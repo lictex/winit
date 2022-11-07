@@ -1872,48 +1872,24 @@ unsafe fn public_window_callback_inner<T: 'static>(
                             })
                         }
                         PT_PEN => {
-                            let mut pen_info = mem::MaybeUninit::uninit();
-                            if let Some((f, p)) =
-                                GET_POINTER_PEN_INFO.and_then(|GetPointerPenInfo| {
-                                    match GetPointerPenInfo(
-                                        pointer_info.pointerId,
-                                        pen_info.as_mut_ptr(),
-                                    ) {
-                                        0 => None,
-                                        _ => normalize_pointer_pressure(
-                                            pen_info.assume_init().pressure,
-                                        )
-                                        .map(|f| {
-                                            (
-                                                f,
-                                                PenState {
-                                                    rotation: pen_info.assume_init().rotation
-                                                        as f64,
-                                                    tilt: (
-                                                        pen_info.assume_init().tiltX as f64,
-                                                        pen_info.assume_init().tiltY as f64,
-                                                    ),
-                                                    barrel: util::has_flag(
-                                                        pen_info.assume_init().penFlags,
-                                                        PEN_FLAG_BARREL,
-                                                    ),
-                                                    inverted: util::has_flag(
-                                                        pen_info.assume_init().penFlags,
-                                                        PEN_FLAG_INVERTED,
-                                                    ),
-                                                    eraser: util::has_flag(
-                                                        pen_info.assume_init().penFlags,
-                                                        PEN_FLAG_ERASER,
-                                                    ),
-                                                },
-                                            )
-                                        }),
-                                    }
-                                })
-                            {
-                                force = Some(f);
-                                pen_state = Some(p);
-                            }
+                            let _ = windows::UI::Input::PointerPoint::GetCurrentPoint(
+                                pointer_info.pointerId,
+                            )
+                            .and_then(|pt| pt.Properties())
+                            .and_then(|props| {
+                                let pressure = props.Pressure()?;
+                                if pressure > 0.0 {
+                                    force = Some(Force::Normalized(pressure.into()));
+                                }
+                                pen_state = Some(PenState {
+                                    rotation: props.Orientation()? as f64,
+                                    tilt: (props.XTilt()? as f64, props.YTilt()? as f64),
+                                    barrel: props.IsBarrelButtonPressed()?,
+                                    inverted: props.IsInverted()?,
+                                    eraser: props.IsEraser()?,
+                                });
+                                Ok(())
+                            });
                         }
                         _ => {}
                     }
