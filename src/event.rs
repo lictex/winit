@@ -438,6 +438,7 @@ pub enum WindowEvent<'a> {
     /// ## Platform-specific
     ///
     /// - Only available on **macOS**.
+    #[cfg(target_os = "macos")]
     TouchpadMagnify {
         device_id: DeviceId,
         delta: f64,
@@ -452,6 +453,7 @@ pub enum WindowEvent<'a> {
     /// ## Platform-specific
     ///
     /// - Only available on **macOS**.
+    #[cfg(target_os = "macos")]
     TouchpadRotate {
         device_id: DeviceId,
         delta: f32,
@@ -581,6 +583,7 @@ impl Clone for WindowEvent<'static> {
                 button: *button,
                 modifiers: *modifiers,
             },
+            #[cfg(target_os = "macos")]
             TouchpadMagnify {
                 device_id,
                 delta,
@@ -590,6 +593,7 @@ impl Clone for WindowEvent<'static> {
                 delta: *delta,
                 phase: *phase,
             },
+            #[cfg(target_os = "macos")]
             TouchpadRotate {
                 device_id,
                 delta,
@@ -687,6 +691,7 @@ impl<'a> WindowEvent<'a> {
                 button,
                 modifiers,
             }),
+            #[cfg(target_os = "macos")]
             TouchpadMagnify {
                 device_id,
                 delta,
@@ -696,6 +701,7 @@ impl<'a> WindowEvent<'a> {
                 delta,
                 phase,
             }),
+            #[cfg(target_os = "macos")]
             TouchpadRotate {
                 device_id,
                 delta,

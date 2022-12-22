@@ -22,6 +22,7 @@ fn main() {
         if let Event::WindowEvent { event, .. } = event {
             match event {
                 WindowEvent::CloseRequested => *control_flow = ControlFlow::Exit,
+                #[cfg(target_os = "macos")]
                 WindowEvent::TouchpadMagnify { delta, .. } => {
                     if delta > 0.0 {
                         println!("Zoomed in {}", delta);
@@ -29,6 +30,7 @@ fn main() {
                         println!("Zoomed out {}", delta);
                     }
                 }
+                #[cfg(target_os = "macos")]
                 WindowEvent::TouchpadRotate { delta, .. } => {
                     if delta > 0.0 {
                         println!("Rotated counterclockwise {}", delta);
