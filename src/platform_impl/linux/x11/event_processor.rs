@@ -1229,7 +1229,7 @@ impl<T: 'static> EventProcessor<T> {
                                                 new_monitor.scale_factor,
                                                 width,
                                                 height,
-                                                &*window.shared_state_lock(),
+                                                &window.shared_state_lock(),
                                             );
 
                                             let window_id = crate::window::WindowId(*window_id);
