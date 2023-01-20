@@ -73,7 +73,7 @@ core-graphics = "0.22.3"
 dispatch = "0.2.0"
 
 [target.'cfg(target_os = "windows")'.dependencies.windows-sys]
-version = "0.42"
+version = "0.36"
 features = [
     "Win32_Devices_HumanInterfaceDevice",
     "Win32_Foundation",
@@ -105,6 +105,8 @@ features = [
 version = "0.42"
 features = [
     "UI_Input",
+    "Devices_Input",
+    "Foundation_Collections",
 ]
 
 [target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))'.dependencies]
