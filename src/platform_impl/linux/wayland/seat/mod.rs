@@ -6,8 +6,11 @@ use std::rc::Rc;
 use sctk::reexports::protocols::unstable::relative_pointer::v1::client::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1;
 use sctk::reexports::protocols::unstable::pointer_constraints::v1::client::zwp_pointer_constraints_v1::ZwpPointerConstraintsV1;
 use sctk::reexports::protocols::unstable::text_input::v3::client::zwp_text_input_manager_v3::ZwpTextInputManagerV3;
+use sctk::reexports::protocols::unstable::tablet::v2::client::zwp_tablet_manager_v2::ZwpTabletManagerV2;
 
+use sctk::reexports::client::protocol::wl_compositor::WlCompositor;
 use sctk::reexports::client::protocol::wl_seat::WlSeat;
+use sctk::reexports::client::protocol::wl_shm::WlShm;
 use sctk::reexports::client::Attached;
 
 use sctk::environment::Environment;
@@ -21,13 +24,21 @@ use crate::event::ModifiersState;
 
 mod keyboard;
 pub mod pointer;
+mod tablet;
 pub mod text_input;
 mod touch;
 
 use keyboard::Keyboard;
 use pointer::Pointers;
+use tablet::Tablet;
 use text_input::TextInput;
 use touch::Touch;
+
+type TabletManager = (
+    Attached<ZwpTabletManagerV2>,
+    Attached<WlCompositor>,
+    Attached<WlShm>,
+);
 
 pub struct SeatManager {
     /// Listener for seats.
@@ -42,12 +53,20 @@ impl SeatManager {
     ) -> Self {
         let relative_pointer_manager = env.get_global::<ZwpRelativePointerManagerV1>();
         let pointer_constraints = env.get_global::<ZwpPointerConstraintsV1>();
+        let tablet_manager = env.get_global::<ZwpTabletManagerV2>().map(|manager| {
+            (
+                manager,
+                env.require_global::<WlCompositor>(),
+                env.require_global::<WlShm>(),
+            )
+        });
         let text_input_manager = env.get_global::<ZwpTextInputManagerV3>();
 
         let mut inner = SeatManagerInner::new(
             theme_manager,
             relative_pointer_manager,
             pointer_constraints,
+            tablet_manager,
             text_input_manager,
             loop_handle,
         );
@@ -86,6 +105,9 @@ struct SeatManagerInner {
     /// Pointer constraints.
     pointer_constraints: Option<Attached<ZwpPointerConstraintsV1>>,
 
+    /// Tablet manager.
+    tablet_manager: Option<TabletManager>,
+
     /// Text input manager.
     text_input_manager: Option<Attached<ZwpTextInputManagerV3>>,
 
@@ -98,6 +120,7 @@ impl SeatManagerInner {
         theme_manager: ThemeManager,
         relative_pointer_manager: Option<Attached<ZwpRelativePointerManagerV1>>,
         pointer_constraints: Option<Attached<ZwpPointerConstraintsV1>>,
+        tablet_manager: Option<TabletManager>,
         text_input_manager: Option<Attached<ZwpTextInputManagerV3>>,
         loop_handle: LoopHandle<'static, WinitState>,
     ) -> Self {
@@ -106,6 +129,7 @@ impl SeatManagerInner {
             loop_handle,
             relative_pointer_manager,
             pointer_constraints,
+            tablet_manager,
             text_input_manager,
             theme_manager,
         }
@@ -160,6 +184,16 @@ impl SeatManagerInner {
             seat_info.touch = None;
         }
 
+        // Handle tablet.
+        match self.tablet_manager.as_ref() {
+            Some((tablet_manager, compositor, shm))
+                if !seat_data.defunct && seat_info.tablet.is_none() =>
+            {
+                seat_info.tablet = Some(Tablet::new(&tablet_manager, &compositor, &shm, seat))
+            }
+            _ => seat_info.tablet = None,
+        }
+
         // Handle text input.
         if let Some(text_input_manager) = self.text_input_manager.as_ref() {
             if seat_data.defunct {
@@ -185,6 +219,9 @@ struct SeatInfo {
     /// Touch handling.
     touch: Option<Touch>,
 
+    /// Tablet.
+    tablet: Option<Tablet>,
+
     /// Text input handling aka IME.
     text_input: Option<TextInput>,
 
@@ -201,6 +238,7 @@ impl SeatInfo {
             keyboard: None,
             pointer: None,
             touch: None,
+            tablet: None,
             text_input: None,
             modifiers_state: Rc::new(RefCell::new(ModifiersState::default())),
         }

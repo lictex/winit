@@ -13,6 +13,7 @@ use sctk::reexports::protocols::xdg_shell::client::xdg_wm_base::XdgWmBase;
 use sctk::reexports::protocols::unstable::relative_pointer::v1::client::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1;
 use sctk::reexports::protocols::unstable::pointer_constraints::v1::client::zwp_pointer_constraints_v1::ZwpPointerConstraintsV1;
 use sctk::reexports::protocols::unstable::text_input::v3::client::zwp_text_input_manager_v3::ZwpTextInputManagerV3;
+use sctk::reexports::protocols::unstable::tablet::v2::client::zwp_tablet_manager_v2::ZwpTabletManagerV2;
 use sctk::reexports::protocols::staging::xdg_activation::v1::client::xdg_activation_v1::XdgActivationV1;
 use sctk::reexports::protocols::viewporter::client::wp_viewporter::WpViewporter;
 
@@ -62,6 +63,7 @@ sctk::environment!(WinitEnv,
         ZxdgDecorationManagerV1 => decoration_manager,
         ZwpRelativePointerManagerV1 => relative_pointer_manager,
         ZwpPointerConstraintsV1 => pointer_constraints,
+        ZwpTabletManagerV2 => tablet_manager,
         ZwpTextInputManagerV3 => text_input_manager,
         XdgActivationV1 => xdg_activation,
         WpFractionalScaleManagerV1 => fractional_scale_manager,
@@ -90,6 +92,8 @@ pub struct WinitEnv {
     relative_pointer_manager: SimpleGlobal<ZwpRelativePointerManagerV1>,
 
     pointer_constraints: SimpleGlobal<ZwpPointerConstraintsV1>,
+
+    tablet_manager: SimpleGlobal<ZwpTabletManagerV2>,
 
     text_input_manager: SimpleGlobal<ZwpTextInputManagerV3>,
 
@@ -128,6 +132,9 @@ impl WinitEnv {
         // Pointer grab functionality.
         let pointer_constraints = SimpleGlobal::new();
 
+        // Tablet handling.
+        let tablet_manager = SimpleGlobal::new();
+
         // IME handling.
         let text_input_manager = SimpleGlobal::new();
 
@@ -150,6 +157,7 @@ impl WinitEnv {
             decoration_manager,
             relative_pointer_manager,
             pointer_constraints,
+            tablet_manager,
             text_input_manager,
             xdg_activation,
             fractional_scale_manager,

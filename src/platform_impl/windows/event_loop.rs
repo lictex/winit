@@ -22,7 +22,7 @@ use raw_window_handle::{RawDisplayHandle, WindowsDisplayHandle};
 
 use windows_sys::Win32::{
     Devices::HumanInterfaceDevice::MOUSE_MOVE_RELATIVE,
-    Foundation::{BOOL, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WAIT_TIMEOUT, WPARAM},
+    Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WAIT_TIMEOUT, WPARAM},
     Graphics::Gdi::{
         GetMonitorInfoW, GetUpdateRect, MonitorFromRect, MonitorFromWindow, RedrawWindow,
         ScreenToClient, ValidateRect, MONITORINFO, MONITOR_DEFAULTTONULL, RDW_INTERNALPAINT,
@@ -38,10 +38,6 @@ use windows_sys::Win32::{
                 MapVirtualKeyA, ReleaseCapture, SetCapture, TrackMouseEvent, MAPVK_VK_TO_VSC,
                 TME_LEAVE, TRACKMOUSEEVENT,
             },
-            Pointer::{
-                POINTER_FLAG_DOWN, POINTER_FLAG_UP, POINTER_FLAG_UPDATE, POINTER_INFO,
-                POINTER_PEN_INFO, POINTER_TOUCH_INFO,
-            },
             Touch::{
                 CloseTouchInputHandle, GetTouchInputInfo, TOUCHEVENTF_DOWN, TOUCHEVENTF_MOVE,
                 TOUCHEVENTF_UP, TOUCHINPUT,
@@ -54,28 +50,28 @@ use windows_sys::Win32::{
             PostThreadMessageW, RegisterClassExW, RegisterWindowMessageA, SetCursor, SetWindowPos,
             TranslateMessage, CREATESTRUCTW, GIDC_ARRIVAL, GIDC_REMOVAL, GWL_STYLE, GWL_USERDATA,
             HTCAPTION, HTCLIENT, MINMAXINFO, MNC_CLOSE, MSG, MWMO_INPUTAVAILABLE,
-            NCCALCSIZE_PARAMS, PM_NOREMOVE, PM_QS_PAINT, PM_REMOVE, PT_PEN, PT_TOUCH, QS_ALLEVENTS,
-            RI_KEY_E0, RI_KEY_E1, RI_MOUSE_WHEEL, SC_MINIMIZE, SC_RESTORE, SIZE_MAXIMIZED,
-            SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WHEEL_DELTA, WINDOWPOS,
-            WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_CREATE, WM_DESTROY, WM_DPICHANGED,
-            WM_DROPFILES, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_IME_COMPOSITION,
+            NCCALCSIZE_PARAMS, PM_NOREMOVE, PM_QS_PAINT, PM_REMOVE, QS_ALLEVENTS, RI_KEY_E0,
+            RI_KEY_E1, RI_MOUSE_WHEEL, SC_MINIMIZE, SC_RESTORE, SIZE_MAXIMIZED, SWP_NOACTIVATE,
+            SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WHEEL_DELTA, WINDOWPOS, WM_CAPTURECHANGED,
+            WM_CHAR, WM_CLOSE, WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES,
+            WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_IME_COMPOSITION,
             WM_IME_ENDCOMPOSITION, WM_IME_SETCONTEXT, WM_IME_STARTCOMPOSITION, WM_INPUT,
             WM_INPUT_DEVICE_CHANGE, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN,
             WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MENUCHAR, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
             WM_MOUSEWHEEL, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCCREATE, WM_NCDESTROY,
-            WM_NCLBUTTONDOWN, WM_PAINT, WM_POINTERDOWN, WM_POINTERUP, WM_POINTERUPDATE,
-            WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SETTINGCHANGE, WM_SIZE,
-            WM_SYSCHAR, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TOUCH, WM_WINDOWPOSCHANGED,
-            WM_WINDOWPOSCHANGING, WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSEXW, WS_EX_LAYERED,
-            WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_OVERLAPPED, WS_POPUP,
-            WS_VISIBLE,
+            WM_NCLBUTTONDOWN, WM_PAINT, WM_POINTERDOWN, WM_POINTERENTER, WM_POINTERLEAVE,
+            WM_POINTERUP, WM_POINTERUPDATE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR,
+            WM_SETFOCUS, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR, WM_SYSCOMMAND, WM_SYSKEYDOWN,
+            WM_SYSKEYUP, WM_TOUCH, WM_WINDOWPOSCHANGED, WM_WINDOWPOSCHANGING, WM_XBUTTONDOWN,
+            WM_XBUTTONUP, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+            WS_EX_TRANSPARENT, WS_OVERLAPPED, WS_POPUP, WS_VISIBLE,
         },
     },
 };
 
 use crate::{
     dpi::{PhysicalPosition, PhysicalSize},
-    event::{DeviceEvent, Event, Force, Ime, KeyboardInput, Touch, TouchPhase, WindowEvent},
+    event::{DeviceEvent, Event, Ime, KeyboardInput, Touch, TouchPhase, WindowEvent},
     event_loop::{
         ControlFlow, DeviceEventFilter, EventLoopClosed, EventLoopWindowTarget as RootELW,
     },
@@ -96,37 +92,6 @@ use crate::{
 use runner::{EventLoopRunner, EventLoopRunnerShared};
 
 use super::window::set_skip_taskbar;
-
-type GetPointerFrameInfoHistory = unsafe extern "system" fn(
-    pointerId: u32,
-    entriesCount: *mut u32,
-    pointerCount: *mut u32,
-    pointerInfo: *mut POINTER_INFO,
-) -> BOOL;
-
-type SkipPointerFrameMessages = unsafe extern "system" fn(pointerId: u32) -> BOOL;
-type GetPointerDeviceRects = unsafe extern "system" fn(
-    device: HANDLE,
-    pointerDeviceRect: *mut RECT,
-    displayRect: *mut RECT,
-) -> BOOL;
-
-type GetPointerTouchInfo =
-    unsafe extern "system" fn(pointerId: u32, touchInfo: *mut POINTER_TOUCH_INFO) -> BOOL;
-
-type GetPointerPenInfo =
-    unsafe extern "system" fn(pointId: u32, penInfo: *mut POINTER_PEN_INFO) -> BOOL;
-
-static GET_POINTER_FRAME_INFO_HISTORY: Lazy<Option<GetPointerFrameInfoHistory>> =
-    Lazy::new(|| get_function!("user32.dll", GetPointerFrameInfoHistory));
-static SKIP_POINTER_FRAME_MESSAGES: Lazy<Option<SkipPointerFrameMessages>> =
-    Lazy::new(|| get_function!("user32.dll", SkipPointerFrameMessages));
-static GET_POINTER_DEVICE_RECTS: Lazy<Option<GetPointerDeviceRects>> =
-    Lazy::new(|| get_function!("user32.dll", GetPointerDeviceRects));
-static GET_POINTER_TOUCH_INFO: Lazy<Option<GetPointerTouchInfo>> =
-    Lazy::new(|| get_function!("user32.dll", GetPointerTouchInfo));
-static GET_POINTER_PEN_INFO: Lazy<Option<GetPointerPenInfo>> =
-    Lazy::new(|| get_function!("user32.dll", GetPointerPenInfo));
 
 pub(crate) struct WindowData<T: 'static> {
     pub window_state: Arc<Mutex<WindowState>>,
@@ -726,13 +691,6 @@ unsafe fn release_mouse(mut window_state: MutexGuard<'_, WindowState>) {
         // ReleaseCapture() causes a WM_CAPTURECHANGED where we lock the window_state.
         drop(window_state);
         ReleaseCapture();
-    }
-}
-
-fn normalize_pointer_pressure(pressure: u32) -> Option<Force> {
-    match pressure {
-        1..=1024 => Some(Force::Normalized(pressure as f64 / 1024.0)),
-        _ => None,
     }
 }
 
@@ -1774,143 +1732,106 @@ unsafe fn public_window_callback_inner<T: 'static>(
             0
         }
 
-        WM_POINTERDOWN | WM_POINTERUPDATE | WM_POINTERUP => {
-            if let (
-                Some(GetPointerFrameInfoHistory),
-                Some(SkipPointerFrameMessages),
-                Some(GetPointerDeviceRects),
-            ) = (
-                *GET_POINTER_FRAME_INFO_HISTORY,
-                *SKIP_POINTER_FRAME_MESSAGES,
-                *GET_POINTER_DEVICE_RECTS,
-            ) {
-                let pointer_id = super::loword(wparam as u32) as u32;
-                let mut entries_count = 0u32;
-                let mut pointers_count = 0u32;
-                if GetPointerFrameInfoHistory(
-                    pointer_id,
-                    &mut entries_count,
-                    &mut pointers_count,
-                    ptr::null_mut(),
-                ) == false.into()
-                {
-                    return 0;
-                }
-
-                let pointer_info_count = (entries_count * pointers_count) as usize;
-                let mut pointer_infos = Vec::with_capacity(pointer_info_count);
-                if GetPointerFrameInfoHistory(
-                    pointer_id,
-                    &mut entries_count,
-                    &mut pointers_count,
-                    pointer_infos.as_mut_ptr(),
-                ) == false.into()
-                {
-                    return 0;
-                }
-                pointer_infos.set_len(pointer_info_count);
-
-                // https://docs.microsoft.com/en-us/windows/desktop/api/winuser/nf-winuser-getpointerframeinfohistory
-                // The information retrieved appears in reverse chronological order, with the most recent entry in the first
-                // row of the returned array
-                for pointer_info in pointer_infos.iter().rev() {
-                    let mut device_rect = mem::MaybeUninit::uninit();
-                    let mut display_rect = mem::MaybeUninit::uninit();
-
-                    if GetPointerDeviceRects(
-                        pointer_info.sourceDevice,
-                        device_rect.as_mut_ptr(),
-                        display_rect.as_mut_ptr(),
-                    ) == false.into()
-                    {
-                        continue;
+        event if matches!(event, WM_POINTERENTER | WM_POINTERLEAVE) => {
+            let pointer_id = super::loword(wparam as u32) as u32;
+            let _ =
+                windows::UI::Input::PointerPoint::GetCurrentPoint(pointer_id).and_then(|point| {
+                    if !matches!(
+                        point.PointerDevice()?.PointerDeviceType()?,
+                        windows::Devices::Input::PointerDeviceType::Pen
+                    ) {
+                        return Ok(());
                     }
-
-                    let device_rect = device_rect.assume_init();
-                    let display_rect = display_rect.assume_init();
-
-                    // For the most precise himetric to pixel conversion we calculate the ratio between the resolution
-                    // of the display device (pixel) and the touch device (himetric).
-                    let himetric_to_pixel_ratio_x = (display_rect.right - display_rect.left) as f64
-                        / (device_rect.right - device_rect.left) as f64;
-                    let himetric_to_pixel_ratio_y = (display_rect.bottom - display_rect.top) as f64
-                        / (device_rect.bottom - device_rect.top) as f64;
-
-                    // ptHimetricLocation's origin is 0,0 even on multi-monitor setups.
-                    // On multi-monitor setups we need to translate the himetric location to the rect of the
-                    // display device it's attached to.
-                    let x = display_rect.left as f64
-                        + pointer_info.ptHimetricLocation.x as f64 * himetric_to_pixel_ratio_x;
-                    let y = display_rect.top as f64
-                        + pointer_info.ptHimetricLocation.y as f64 * himetric_to_pixel_ratio_y;
-
-                    let mut location = POINT {
-                        x: x.floor() as i32,
-                        y: y.floor() as i32,
-                    };
-
-                    if ScreenToClient(window, &mut location) == false.into() {
-                        continue;
-                    }
-
-                    let force = match pointer_info.pointerType {
-                        PT_TOUCH => {
-                            let mut touch_info = mem::MaybeUninit::uninit();
-                            GET_POINTER_TOUCH_INFO.and_then(|GetPointerTouchInfo| {
-                                match GetPointerTouchInfo(
-                                    pointer_info.pointerId,
-                                    touch_info.as_mut_ptr(),
-                                ) {
-                                    0 => None,
-                                    _ => normalize_pointer_pressure(
-                                        touch_info.assume_init().pressure,
-                                    ),
-                                }
-                            })
-                        }
-                        PT_PEN => {
-                            let mut pen_info = mem::MaybeUninit::uninit();
-                            GET_POINTER_PEN_INFO.and_then(|GetPointerPenInfo| {
-                                match GetPointerPenInfo(
-                                    pointer_info.pointerId,
-                                    pen_info.as_mut_ptr(),
-                                ) {
-                                    0 => None,
-                                    _ => {
-                                        normalize_pointer_pressure(pen_info.assume_init().pressure)
-                                    }
-                                }
-                            })
-                        }
-                        _ => None,
-                    };
-
-                    let x = location.x as f64 + x.fract();
-                    let y = location.y as f64 + y.fract();
-                    let location = PhysicalPosition::new(x, y);
+                    let inverted = point.Properties()?.IsInverted()?;
                     userdata.send_event(Event::WindowEvent {
                         window_id: RootWindowId(WindowId(window)),
-                        event: WindowEvent::Touch(Touch {
-                            phase: if util::has_flag(pointer_info.pointerFlags, POINTER_FLAG_DOWN) {
-                                TouchPhase::Started
-                            } else if util::has_flag(pointer_info.pointerFlags, POINTER_FLAG_UP) {
-                                TouchPhase::Ended
-                            } else if util::has_flag(pointer_info.pointerFlags, POINTER_FLAG_UPDATE)
-                            {
-                                TouchPhase::Moved
-                            } else {
-                                continue;
+                        event: match event {
+                            WM_POINTERENTER => WindowEvent::TabletPenEnter {
+                                device_id: DEVICE_ID,
+                                inverted,
                             },
-                            location,
-                            force,
-                            id: pointer_info.pointerId as u64,
-                            device_id: DEVICE_ID,
-                        }),
+                            WM_POINTERLEAVE => WindowEvent::TabletPenLeave {
+                                device_id: DEVICE_ID,
+                            },
+                            _ => unreachable!(),
+                        },
                     });
-                }
 
-                SkipPointerFrameMessages(pointer_id);
-            }
+                    Ok(())
+                });
+            0
+        }
+
+        event if matches!(event, WM_POINTERDOWN | WM_POINTERUP) => {
+            let pointer_id = super::loword(wparam as u32) as u32;
+            let _ =
+                windows::UI::Input::PointerPoint::GetCurrentPoint(pointer_id).and_then(|point| {
+                    if !matches!(
+                        point.PointerDevice()?.PointerDeviceType()?,
+                        windows::Devices::Input::PointerDeviceType::Pen
+                    ) {
+                        return Ok(());
+                    }
+                    let eraser = point.Properties()?.IsEraser()?;
+                    userdata.send_event(Event::WindowEvent {
+                        window_id: RootWindowId(WindowId(window)),
+                        event: WindowEvent::TabletButton {
+                            device_id: DEVICE_ID,
+                            button: match eraser {
+                                true => crate::event::TabletButton::Eraser,
+                                false => crate::event::TabletButton::Tip,
+                            },
+                            state: match event {
+                                WM_POINTERDOWN => crate::event::ElementState::Pressed,
+                                WM_POINTERUP => crate::event::ElementState::Released,
+                                _ => unreachable!(),
+                            },
+                        },
+                    });
+
+                    Ok(())
+                });
+            0
+        }
+
+        WM_POINTERUPDATE => {
+            let pointer_id = super::loword(wparam as u32) as u32;
+            let _ = windows::UI::Input::PointerPoint::GetIntermediatePoints(pointer_id).and_then(
+                |points| {
+                    let len = points.Size()?;
+                    for i in (0..len).rev() {
+                        let point = points.GetAt(i)?;
+                        if !matches!(
+                            point.PointerDevice()?.PointerDeviceType()?,
+                            windows::Devices::Input::PointerDeviceType::Pen
+                        ) {
+                            continue;
+                        }
+
+                        let props = point.Properties()?;
+                        let pressure = props.Pressure()?.into();
+                        let rotation = props.Orientation()?.into();
+                        let distance = props.ZDistance()?.GetSingle()?.into();
+                        let tilt = [props.XTilt()?.into(), props.YTilt()?.into()];
+                        let location = PhysicalPosition::new(
+                            point.Position()?.X as f64,
+                            point.Position()?.Y as f64,
+                        );
+                        userdata.send_event(Event::WindowEvent {
+                            window_id: RootWindowId(WindowId(window)),
+                            event: WindowEvent::TabletPenMotion {
+                                device_id: DEVICE_ID,
+                                location,
+                                pressure,
+                                rotation,
+                                distance,
+                                tilt,
+                            },
+                        });
+                    }
+                    Ok(())
+                },
+            );
             0
         }
 
@@ -2471,7 +2392,9 @@ unsafe extern "system" fn thread_event_target_callback<T: 'static>(
                     }
                 }
             }
-            userdata.event_loop_runner.poll();
+            if !userdata.event_loop_runner.should_buffer() {
+                userdata.event_loop_runner.poll();
+            }
             0
         }
         _ => DefWindowProcW(window, msg, wparam, lparam),

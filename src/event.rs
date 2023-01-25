@@ -511,6 +511,27 @@ pub enum WindowEvent<'a> {
     /// - **macOS:** Unsupported.
     Touch(Touch),
 
+    TabletPenEnter {
+        device_id: DeviceId,
+        inverted: bool,
+    },
+    TabletPenLeave {
+        device_id: DeviceId,
+    },
+    TabletPenMotion {
+        device_id: DeviceId,
+        location: PhysicalPosition<f64>,
+        pressure: f64,
+        rotation: f64,
+        distance: f64,
+        tilt: [f64; 2],
+    },
+    TabletButton {
+        device_id: DeviceId,
+        button: TabletButton,
+        state: ElementState,
+    },
+
     /// The window's scale factor has changed.
     ///
     /// The following user actions can cause DPI changes:
@@ -653,6 +674,37 @@ impl Clone for WindowEvent<'static> {
                 value: *value,
             },
             Touch(touch) => Touch(*touch),
+            TabletPenEnter { device_id, inverted: eraser } => TabletPenEnter {
+                device_id: *device_id,
+                inverted: *eraser,
+            },
+            TabletPenLeave { device_id } => TabletPenLeave {
+                device_id: *device_id,
+            },
+            TabletPenMotion {
+                device_id,
+                location,
+                pressure,
+                rotation,
+                distance,
+                tilt,
+            } => TabletPenMotion {
+                device_id: *device_id,
+                location: *location,
+                pressure: *pressure,
+                rotation: *rotation,
+                distance: *distance,
+                tilt: *tilt,
+            },
+            TabletButton {
+                device_id,
+                button,
+                state,
+            } => TabletButton {
+                device_id: *device_id,
+                button: *button,
+                state: *state,
+            },
             ThemeChanged(theme) => ThemeChanged(*theme),
             ScaleFactorChanged { .. } => {
                 unreachable!("Static event can't be about scale factor changing")
@@ -760,6 +812,32 @@ impl<'a> WindowEvent<'a> {
                 value,
             }),
             Touch(touch) => Some(Touch(touch)),
+            TabletPenEnter { device_id, inverted: eraser } => Some(TabletPenEnter { device_id, inverted: eraser }),
+            TabletPenLeave { device_id } => Some(TabletPenLeave { device_id }),
+            TabletPenMotion {
+                device_id,
+                location,
+                pressure,
+                rotation,
+                distance,
+                tilt,
+            } => Some(TabletPenMotion {
+                device_id,
+                location,
+                pressure,
+                rotation,
+                distance,
+                tilt,
+            }),
+            TabletButton {
+                device_id,
+                button,
+                state,
+            } => Some(TabletButton {
+                device_id,
+                button,
+                state,
+            }),
             ThemeChanged(theme) => Some(ThemeChanged(theme)),
             ScaleFactorChanged { .. } => None,
             Occluded(occluded) => Some(Occluded(occluded)),
@@ -1035,6 +1113,16 @@ impl Force {
             Force::Normalized(force) => *force,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TabletButton {
+    Tip,
+    Eraser,
+    /// - Only available on **Wayland**.
+    Pen(u32),
+    /// - Only available on **Wayland**.
+    Tablet(u32),
 }
 
 /// Hardware-dependent keyboard scan code.

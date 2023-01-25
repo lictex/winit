@@ -18,6 +18,7 @@ use sctk::window::Window;
 
 use crate::event::ModifiersState;
 use crate::platform_impl::wayland::event_loop::WinitState;
+use crate::platform_impl::wayland::seat::tablet::TabletPointer;
 use crate::platform_impl::wayland::window::WinitFrame;
 use crate::window::CursorIcon;
 
@@ -26,34 +27,48 @@ mod handlers;
 
 use data::PointerData;
 
+pub enum PointerType {
+    Normal(ThemedPointer),
+    Tablet(TabletPointer),
+}
+impl PartialEq for PointerType {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Normal(a), Self::Normal(b)) => **a == **b,
+            (Self::Tablet(a), Self::Tablet(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
 /// A proxy to Wayland pointer, which serves requests from a `WindowHandle`.
 pub struct WinitPointer {
-    pointer: ThemedPointer,
+    pub(super) pointer: PointerType,
 
     /// Create confined pointers.
-    pointer_constraints: Option<Attached<ZwpPointerConstraintsV1>>,
+    pub(super) pointer_constraints: Option<Attached<ZwpPointerConstraintsV1>>,
 
     /// Cursor to handle confine requests.
-    confined_pointer: Weak<RefCell<Option<ZwpConfinedPointerV1>>>,
+    pub(super) confined_pointer: Weak<RefCell<Option<ZwpConfinedPointerV1>>>,
 
     /// Cursor to handle locked requests.
-    locked_pointer: Weak<RefCell<Option<ZwpLockedPointerV1>>>,
+    pub(super) locked_pointer: Weak<RefCell<Option<ZwpLockedPointerV1>>>,
 
     /// Latest observed serial in pointer events.
     /// used by Window::start_interactive_move()
-    latest_serial: Rc<Cell<u32>>,
+    pub(super) latest_serial: Rc<Cell<u32>>,
 
     /// Latest observed serial in pointer enter events.
     /// used by Window::set_cursor()
-    latest_enter_serial: Rc<Cell<u32>>,
+    pub(super) latest_enter_serial: Rc<Cell<u32>>,
 
     /// Seat.
-    seat: WlSeat,
+    pub(super) seat: WlSeat,
 }
 
 impl PartialEq for WinitPointer {
     fn eq(&self, other: &Self) -> bool {
-        *self.pointer == *other.pointer
+        self.pointer == other.pointer
     }
 }
 
@@ -70,7 +85,14 @@ impl WinitPointer {
                 // Hide the cursor.
                 // WlPointer::set_cursor() expects the serial of the last *enter*
                 // event (compare to to start_interactive_move()).
-                (*self.pointer).set_cursor(self.latest_enter_serial.get(), None, 0, 0);
+                match &self.pointer {
+                    PointerType::Normal(pointer) => {
+                        (**pointer).set_cursor(self.latest_enter_serial.get(), None, 0, 0);
+                    }
+                    PointerType::Tablet(pointer) => {
+                        (**pointer).set_cursor(self.latest_enter_serial.get(), None, 0, 0);
+                    }
+                }
                 return;
             }
         };
@@ -120,8 +142,19 @@ impl WinitPointer {
 
         let serial = Some(self.latest_enter_serial.get());
         for cursor in cursors {
-            if self.pointer.set_cursor(cursor, serial).is_ok() {
-                return;
+            match &self.pointer {
+                PointerType::Normal(pointer) => {
+                    if pointer.set_cursor(cursor, serial).is_ok() {
+                        return;
+                    }
+                }
+                PointerType::Tablet(pointer) => {
+                    if let Some(serial) = serial {
+                        if pointer.set_cursor(cursor, serial) {
+                            return;
+                        }
+                    }
+                }
             }
         }
         warn!("Failed to set cursor to {:?}", cursor_icon);
@@ -140,11 +173,13 @@ impl WinitPointer {
             None => return,
         };
 
-        *confined_pointer.borrow_mut() = Some(init_confined_pointer(
-            pointer_constraints,
-            surface,
-            &self.pointer,
-        ));
+        match &self.pointer {
+            PointerType::Normal(pointer) => {
+                *confined_pointer.borrow_mut() =
+                    Some(init_confined_pointer(pointer_constraints, surface, pointer));
+            }
+            _ => return,
+        }
     }
 
     /// Tries to unconfine the pointer if the current pointer is confined.
@@ -174,11 +209,13 @@ impl WinitPointer {
             None => return,
         };
 
-        *locked_pointer.borrow_mut() = Some(init_locked_pointer(
-            pointer_constraints,
-            surface,
-            &self.pointer,
-        ));
+        match &self.pointer {
+            PointerType::Normal(pointer) => {
+                *locked_pointer.borrow_mut() =
+                    Some(init_locked_pointer(pointer_constraints, surface, pointer));
+            }
+            _ => return,
+        }
     }
 
     pub fn unlock(&self) {

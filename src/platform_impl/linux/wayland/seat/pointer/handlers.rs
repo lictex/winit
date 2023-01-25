@@ -16,7 +16,7 @@ use crate::event::{
 use crate::platform_impl::wayland::event_loop::WinitState;
 use crate::platform_impl::wayland::{self, DeviceId};
 
-use super::{PointerData, WinitPointer};
+use super::{PointerData, PointerType, WinitPointer};
 
 // These values are comming from <linux/input-event-codes.h>.
 const BTN_LEFT: u32 = 0x110;
@@ -58,7 +58,7 @@ pub(super) fn handle_pointer(
 
             // Notify window that pointer entered the surface.
             let winit_pointer = WinitPointer {
-                pointer,
+                pointer: PointerType::Normal(pointer),
                 confined_pointer: Rc::downgrade(&pointer_data.confined_pointer),
                 locked_pointer: Rc::downgrade(&pointer_data.locked_pointer),
                 pointer_constraints: pointer_data.pointer_constraints.clone(),
@@ -103,7 +103,7 @@ pub(super) fn handle_pointer(
 
             // Notify a window that pointer is no longer observing it.
             let winit_pointer = WinitPointer {
-                pointer,
+                pointer: PointerType::Normal(pointer),
                 confined_pointer: Rc::downgrade(&pointer_data.confined_pointer),
                 locked_pointer: Rc::downgrade(&pointer_data.locked_pointer),
                 pointer_constraints: pointer_data.pointer_constraints.clone(),
