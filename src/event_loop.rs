@@ -313,6 +313,13 @@ impl<T> EventLoop<T> {
     }
 }
 
+unsafe impl<T> HasRawDisplayHandle for EventLoop<T> {
+    /// Returns a [`raw_window_handle::RawDisplayHandle`] for the event loop.
+    fn raw_display_handle(&self) -> RawDisplayHandle {
+        self.event_loop.window_target().p.raw_display_handle()
+    }
+}
+
 impl<T> Deref for EventLoop<T> {
     type Target = EventLoopWindowTarget<T>;
     fn deref(&self) -> &EventLoopWindowTarget<T> {
@@ -324,6 +331,7 @@ impl<T> EventLoopWindowTarget<T> {
     /// Returns the list of all the monitors available on the system.
     #[inline]
     pub fn available_monitors(&self) -> impl Iterator<Item = MonitorHandle> {
+        #[allow(clippy::useless_conversion)] // false positive on some platforms
         self.p
             .available_monitors()
             .into_iter()
