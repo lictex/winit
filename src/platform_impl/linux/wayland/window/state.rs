@@ -16,7 +16,6 @@ use sctk::reexports::protocols::wp::viewporter::client::wp_viewport::WpViewport;
 use sctk::reexports::protocols::xdg::shell::client::xdg_toplevel::ResizeEdge;
 
 use sctk::compositor::{CompositorState, Region, SurfaceData};
-use sctk::seat::pointer::ThemedPointer;
 use sctk::shell::xdg::frame::{DecorationsFrame, FrameAction, FrameClick};
 use sctk::shell::xdg::window::{DecorationMode, Window, WindowConfigure};
 use sctk::shell::xdg::XdgSurface;
@@ -30,7 +29,7 @@ use crate::platform_impl::WindowId;
 use crate::window::{CursorGrabMode, CursorIcon, ImePurpose, ResizeDirection, Theme};
 
 use crate::platform_impl::wayland::seat::{
-    PointerConstraintsState, WinitPointerData, WinitPointerDataExt, ZwpTextInputV3Ext,
+    PointerConstraintsState, WinitPointerData, ZwpTextInputV3Ext,
 };
 use crate::platform_impl::wayland::state::{WindowCompositorUpdate, WinitState};
 
@@ -60,7 +59,7 @@ pub struct WindowState {
     pub last_configure: Option<WindowConfigure>,
 
     /// The pointers observed on the window.
-    pub pointers: Vec<Weak<ThemedPointer<WinitPointerData>>>,
+    pub pointers: Vec<Weak<crate::platform_impl::wayland::GenericPointer>>,
 
     /// Cursor icon.
     pub cursor_icon: CursorIcon,
@@ -147,7 +146,7 @@ impl GrabState {
 
 impl WindowState {
     /// Apply closure on the given pointer.
-    fn apply_on_poiner<F: Fn(&ThemedPointer<WinitPointerData>, &WinitPointerData)>(
+    fn apply_on_poiner<F: Fn(&crate::platform_impl::wayland::GenericPointer, &WinitPointerData)>(
         &self,
         callback: F,
     ) {
@@ -155,7 +154,7 @@ impl WindowState {
             .iter()
             .filter_map(Weak::upgrade)
             .for_each(|pointer| {
-                let data = pointer.pointer().winit_data();
+                let data = pointer.winit_data();
                 callback(pointer.as_ref(), data);
             })
     }
@@ -428,7 +427,7 @@ impl WindowState {
     }
 
     /// Register pointer on the top-level.
-    pub fn pointer_entered(&mut self, added: Weak<ThemedPointer<WinitPointerData>>) {
+    pub fn pointer_entered(&mut self, added: Weak<crate::platform_impl::wayland::GenericPointer>) {
         self.pointers.push(added);
         self.reload_cursor_style();
 
@@ -437,11 +436,11 @@ impl WindowState {
     }
 
     /// Pointer has left the top-level.
-    pub fn pointer_left(&mut self, removed: Weak<ThemedPointer<WinitPointerData>>) {
+    pub fn pointer_left(&mut self, removed: Weak<crate::platform_impl::wayland::GenericPointer>) {
         let mut new_pointers = Vec::new();
         for pointer in self.pointers.drain(..) {
             if let Some(pointer) = pointer.upgrade() {
-                if pointer.pointer() != removed.upgrade().unwrap().pointer() {
+                if pointer != removed.upgrade().unwrap() {
                     new_pointers.push(Arc::downgrade(&pointer));
                 }
             }
@@ -649,12 +648,16 @@ impl WindowState {
         let surface = self.window.wl_surface();
         match mode {
             CursorGrabMode::Locked => self.apply_on_poiner(|pointer, data| {
-                let pointer = pointer.pointer();
-                data.lock_pointer(pointer_constraints, surface, pointer, &self.queue_handle)
+                if let crate::platform_impl::wayland::GenericPointer::Default(pointer) = pointer {
+                    let pointer = pointer.pointer();
+                    data.lock_pointer(pointer_constraints, surface, pointer, &self.queue_handle)
+                }
             }),
             CursorGrabMode::Confined => self.apply_on_poiner(|pointer, data| {
-                let pointer = pointer.pointer();
-                data.confine_pointer(pointer_constraints, surface, pointer, &self.queue_handle)
+                if let crate::platform_impl::wayland::GenericPointer::Default(pointer) = pointer {
+                    let pointer = pointer.pointer();
+                    data.confine_pointer(pointer_constraints, surface, pointer, &self.queue_handle)
+                }
             }),
             CursorGrabMode::None => {
                 // Current lock/confine was already removed.
@@ -694,11 +697,7 @@ impl WindowState {
             self.set_cursor(self.cursor_icon);
         } else {
             for pointer in self.pointers.iter().filter_map(|pointer| pointer.upgrade()) {
-                let latest_enter_serial = pointer.pointer().winit_data().latest_enter_serial();
-
-                pointer
-                    .pointer()
-                    .set_cursor(latest_enter_serial, None, 0, 0);
+                pointer.clear_cursor();
             }
         }
     }

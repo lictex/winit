@@ -71,11 +71,7 @@ impl PointerHandler for WinitState {
                         window.frame_point_moved(surface, event.position.0, event.position.1)
                     {
                         if let Some(pointer) = seat_state.pointer.as_ref() {
-                            let surface = pointer
-                                .pointer()
-                                .data::<WinitPointerData>()
-                                .unwrap()
-                                .cursor_surface();
+                            let surface = pointer.winit_data().cursor_surface();
                             let scale_factor =
                                 surface.data::<SurfaceData>().unwrap().scale_factor();
 
