@@ -1,8 +1,8 @@
 use std::cell::RefCell;
-use std::error::Error;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
-use fnv::FnvHashMap;
+use ahash::AHashMap;
 
 use sctk::reexports::calloop::LoopHandle;
 use sctk::reexports::client::backend::ObjectId;
@@ -22,17 +22,19 @@ use sctk::shm::{Shm, ShmHandler};
 use sctk::subcompositor::SubcompositorState;
 
 use crate::dpi::LogicalSize;
+use crate::platform_impl::OsError;
 
 use super::event_loop::sink::EventSink;
 use super::output::MonitorHandle;
 use super::seat::{
     PointerConstraintsState, RelativePointerState, TabletState, TextInputState, WinitSeatState,
 };
+use super::types::kwin_blur::KWinBlurManager;
 use super::types::wp_fractional_scaling::FractionalScalingManager;
 use super::types::wp_viewporter::ViewporterState;
 use super::types::xdg_activation::XdgActivationState;
 use super::window::{WindowRequests, WindowState};
-use super::WindowId;
+use super::{WaylandError, WindowId};
 
 /// Winit's Wayland state.
 pub struct WinitState {
@@ -58,10 +60,10 @@ pub struct WinitState {
     pub xdg_shell: XdgShell,
 
     /// The currently present windows.
-    pub windows: RefCell<FnvHashMap<WindowId, Arc<Mutex<WindowState>>>>,
+    pub windows: RefCell<AHashMap<WindowId, Arc<Mutex<WindowState>>>>,
 
     /// The requests from the `Window` to EventLoop, such as close operations and redraw requests.
-    pub window_requests: RefCell<FnvHashMap<WindowId, Arc<WindowRequests>>>,
+    pub window_requests: RefCell<AHashMap<WindowId, Arc<WindowRequests>>>,
 
     /// The events that were generated directly from the window.
     pub window_events_sink: Arc<Mutex<EventSink>>,
@@ -70,10 +72,10 @@ pub struct WinitState {
     pub window_compositor_updates: Vec<WindowCompositorUpdate>,
 
     /// Currently handled seats.
-    pub seats: FnvHashMap<ObjectId, WinitSeatState>,
+    pub seats: AHashMap<ObjectId, WinitSeatState>,
 
     /// Currently present cursor surfaces.
-    pub pointer_surfaces: FnvHashMap<ObjectId, Arc<super::GenericPointer>>,
+    pub pointer_surfaces: AHashMap<ObjectId, Arc<super::GenericPointer>>,
 
     /// The state of the text input on the client.
     pub text_input_state: Option<TextInputState>,
@@ -103,8 +105,15 @@ pub struct WinitState {
     /// Fractional scaling manager.
     pub fractional_scaling_manager: Option<FractionalScalingManager>,
 
+    /// KWin blur manager.
+    pub kwin_blur_manager: Option<KWinBlurManager>,
+
     /// Loop handle to re-register event sources, such as keyboard repeat.
     pub loop_handle: LoopHandle<'static, Self>,
+
+    /// Whether we have dispatched events to the user thus we want to
+    /// send `AboutToWait` and normally wakeup the user.
+    pub dispatched_events: bool,
 }
 
 impl WinitState {
@@ -112,21 +121,23 @@ impl WinitState {
         globals: &GlobalList,
         queue_handle: &QueueHandle<Self>,
         loop_handle: LoopHandle<'static, WinitState>,
-    ) -> Result<Self, Box<dyn Error>> {
+    ) -> Result<Self, OsError> {
         let registry_state = RegistryState::new(globals);
-        let compositor_state = CompositorState::bind(globals, queue_handle)?;
+        let compositor_state =
+            CompositorState::bind(globals, queue_handle).map_err(WaylandError::Bind)?;
         let subcompositor_state = SubcompositorState::bind(
             compositor_state.wl_compositor().clone(),
             globals,
             queue_handle,
-        )?;
+        )
+        .map_err(WaylandError::Bind)?;
 
         let output_state = OutputState::new(globals, queue_handle);
         let monitors = output_state.outputs().map(MonitorHandle::new).collect();
 
         let seat_state = SeatState::new(globals, queue_handle);
 
-        let mut seats = FnvHashMap::default();
+        let mut seats = AHashMap::default();
         for seat in seat_state.seats() {
             seats.insert(seat.id(), WinitSeatState::new());
         }
@@ -151,9 +162,9 @@ impl WinitState {
             subcompositor_state: Arc::new(subcompositor_state),
             output_state,
             seat_state,
-            shm: Shm::bind(globals, queue_handle)?,
+            shm: Shm::bind(globals, queue_handle).map_err(WaylandError::Bind)?,
 
-            xdg_shell: XdgShell::bind(globals, queue_handle)?,
+            xdg_shell: XdgShell::bind(globals, queue_handle).map_err(WaylandError::Bind)?,
             xdg_activation: XdgActivationState::bind(globals, queue_handle).ok(),
 
             windows: Default::default(),
@@ -162,6 +173,7 @@ impl WinitState {
             window_events_sink: Default::default(),
             viewporter_state,
             fractional_scaling_manager,
+            kwin_blur_manager: KWinBlurManager::new(globals, queue_handle).ok(),
 
             seats,
             text_input_state: TextInputState::new(globals, queue_handle).ok(),
@@ -176,6 +188,8 @@ impl WinitState {
             monitors: Arc::new(Mutex::new(monitors)),
             events_sink: EventSink::new(),
             loop_handle,
+            // Make it true by default.
+            dispatched_events: true,
         })
     }
 
@@ -282,7 +296,12 @@ impl WindowHandler for WinitState {
             .expect("got configure for dead window.")
             .lock()
             .unwrap()
-            .configure(configure, &self.shm, &self.subcompositor_state);
+            .configure(
+                configure,
+                &self.shm,
+                &self.subcompositor_state,
+                &mut self.events_sink,
+            );
 
         self.window_compositor_updates[pos].size = Some(new_size);
     }
@@ -320,6 +339,16 @@ impl OutputHandler for WinitState {
 }
 
 impl CompositorHandler for WinitState {
+    fn transform_changed(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wayland_client::protocol::wl_surface::WlSurface,
+        _: wayland_client::protocol::wl_output::Transform,
+    ) {
+        // TODO(kchibisov) we need to expose it somehow in winit.
+    }
+
     fn scale_factor_changed(
         &mut self,
         _: &Connection,
@@ -330,7 +359,27 @@ impl CompositorHandler for WinitState {
         self.scale_factor_changed(surface, scale_factor as f64, true)
     }
 
-    fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlSurface, _: u32) {}
+    fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, surface: &WlSurface, _: u32) {
+        let window_id = super::make_wid(surface);
+        let window = match self.windows.get_mut().get(&window_id) {
+            Some(window) => window,
+            None => return,
+        };
+
+        // In case we have a redraw requested we must indicate the wake up.
+        if self
+            .window_requests
+            .get_mut()
+            .get(&window_id)
+            .unwrap()
+            .redraw_requested
+            .load(Ordering::Relaxed)
+        {
+            self.dispatched_events = true;
+        }
+
+        window.lock().unwrap().frame_callback_received();
+    }
 }
 
 impl ProvidesRegistryState for WinitState {

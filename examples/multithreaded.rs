@@ -1,7 +1,7 @@
 #![allow(clippy::single_match)]
 
 #[cfg(not(wasm_platform))]
-fn main() {
+fn main() -> Result<(), impl std::error::Error> {
     use std::{collections::HashMap, sync::mpsc, thread, time::Duration};
 
     use simple_logger::SimpleLogger;
@@ -9,7 +9,7 @@ fn main() {
         dpi::{PhysicalPosition, PhysicalSize, Position, Size},
         event::{ElementState, Event, KeyEvent, WindowEvent},
         event_loop::EventLoop,
-        keyboard::{Key, ModifiersState},
+        keyboard::{Key, ModifiersState, NamedKey},
         window::{CursorGrabMode, CursorIcon, Fullscreen, WindowBuilder, WindowLevel},
     };
 
@@ -17,7 +17,7 @@ fn main() {
     const WINDOW_SIZE: PhysicalSize<u32> = PhysicalSize::new(600, 400);
 
     SimpleLogger::new().init().unwrap();
-    let event_loop = EventLoop::new();
+    let event_loop = EventLoop::new().unwrap();
     let mut window_senders = HashMap::with_capacity(WINDOW_COUNT);
     for _ in 0..WINDOW_COUNT {
         let window = WindowBuilder::new()
@@ -65,17 +65,17 @@ fn main() {
                             },
                         ..
                     } => {
-                        use Key::{ArrowLeft, ArrowRight};
+                        use NamedKey::{ArrowLeft, ArrowRight};
                         window.set_title(&format!("{key:?}"));
                         let state = !modifiers.shift_key();
                         match key {
                             // Cycle through video modes
-                            Key::ArrowRight | Key::ArrowLeft => {
-                                video_mode_id = match key {
-                                    ArrowLeft => video_mode_id.saturating_sub(1),
-                                    ArrowRight => (video_modes.len() - 1).min(video_mode_id + 1),
-                                    _ => unreachable!(),
-                                };
+                            Key::Named(ArrowRight) | Key::Named(ArrowLeft) => {
+                                if key == ArrowLeft {
+                                    video_mode_id = video_mode_id.saturating_sub(1);
+                                } else if key == ArrowRight {
+                                    video_mode_id = (video_modes.len() - 1).min(video_mode_id + 1);
+                                }
                                 println!("Picking video mode: {}", video_modes[video_mode_id]);
                             }
                             // WARNING: Consider using `key_without_modifers()` if available on your platform.
@@ -137,13 +137,15 @@ fn main() {
                                 }),
                                 "q" => window.request_redraw(),
                                 "r" => window.set_resizable(state),
-                                "s" => window.set_inner_size(match state {
-                                    true => PhysicalSize::new(
-                                        WINDOW_SIZE.width + 100,
-                                        WINDOW_SIZE.height + 100,
-                                    ),
-                                    false => WINDOW_SIZE,
-                                }),
+                                "s" => {
+                                    let _ = window.request_inner_size(match state {
+                                        true => PhysicalSize::new(
+                                            WINDOW_SIZE.width + 100,
+                                            WINDOW_SIZE.height + 100,
+                                        ),
+                                        false => WINDOW_SIZE,
+                                    });
+                                }
                                 "w" => {
                                     if let Size::Physical(size) = WINDOW_SIZE.into() {
                                         window
@@ -171,11 +173,10 @@ fn main() {
             }
         });
     }
-    event_loop.run(move |event, _event_loop, control_flow| {
-        match !window_senders.is_empty() {
-            true => control_flow.set_wait(),
-            false => control_flow.set_exit(),
-        };
+    event_loop.run(move |event, elwt| {
+        if window_senders.is_empty() {
+            elwt.exit()
+        }
         match event {
             Event::WindowEvent { event, window_id } => match event {
                 WindowEvent::CloseRequested
@@ -184,7 +185,7 @@ fn main() {
                     event:
                         KeyEvent {
                             state: ElementState::Released,
-                            logical_key: Key::Escape,
+                            logical_key: Key::Named(NamedKey::Escape),
                             ..
                         },
                     ..
@@ -193,9 +194,7 @@ fn main() {
                 }
                 _ => {
                     if let Some(tx) = window_senders.get(&window_id) {
-                        if let Some(event) = event.to_static() {
-                            tx.send(event).unwrap();
-                        }
+                        tx.send(event).unwrap();
                     }
                 }
             },

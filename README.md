@@ -6,14 +6,14 @@
 
 ```toml
 [dependencies]
-winit = "0.28.6"
+winit = "0.29.3"
 ```
 
 ## [Documentation](https://docs.rs/winit)
 
 For features _within_ the scope of winit, see [FEATURES.md](FEATURES.md).
 
-For features _outside_ the scope of winit, see [Missing features provided by other crates](https://github.com/rust-windowing/winit/wiki/Missing-features-provided-by-other-crates) in the wiki.
+For features _outside_ the scope of winit, see [Are we GUI Yet?](https://areweguiyet.com/) and [Are we game yet?](https://arewegameyet.rs/), depending on what kind of project you're looking to do.
 
 ## Contact Us
 
@@ -32,33 +32,6 @@ Winit is designed to be a low-level brick in a hierarchy of libraries. Consequen
 show something on the window you need to use the platform-specific getters provided by winit, or
 another library.
 
-```rust
-use winit::{
-    event::{Event, WindowEvent},
-    event_loop::{ControlFlow, EventLoop},
-    window::WindowBuilder,
-};
-
-fn main() {
-    let event_loop = EventLoop::new();
-    let window = WindowBuilder::new().build(&event_loop).unwrap();
-
-    event_loop.run(move |event, _, control_flow| {
-        *control_flow = ControlFlow::Wait;
-
-        match event {
-            Event::WindowEvent {
-                event: WindowEvent::CloseRequested,
-                window_id,
-            } if window_id == window.id() => *control_flow = ControlFlow::Exit,
-            _ => (),
-        }
-    });
-}
-```
-
-Winit is only officially supported on the latest stable version of the Rust compiler.
-
 ### Cargo Features
 
 Winit provides the following features, which can be enabled in your `Cargo.toml` file:
@@ -67,15 +40,40 @@ Winit provides the following features, which can be enabled in your `Cargo.toml`
 * `wayland` (enabled by default): On Unix platform, compiles with the Wayland backend
 * `mint`: Enables mint (math interoperability standard types) conversions.
 
+## MSRV Policy
+
+The Minimum Supported Rust Version (MSRV) of this crate is **1.65**. Changes to
+the MSRV will be accompanied by a minor version bump.
+
+As a **tentative** policy, the upper bound of the MSRV is given by the following
+formula:
+
+```
+min(sid, stable - 3)
+```
+
+Where `sid` is the current version of `rustc` provided by [Debian Sid], and
+`stable` is the latest stable version of Rust. This bound may be broken in the
+event of a major ecosystem shift or a security vulnerability.
+
+[Debian Sid]: https://packages.debian.org/sid/rustc
+
+The exception to this is for the Android platform, where a higher Rust version
+must be used for certain Android features. In this case, the MSRV will be
+capped at the latest stable version of Rust minus three. This inconsistency is
+not reflected in Cargo metadata, as it is not powerful enough to expose this
+restriction.
+
+All crates in the [`rust-windowing`] organizations have the
+same MSRV policy.
+
+[`rust-windowing`]: https://github.com/rust-windowing
+
 ### Platform-specific usage
 
 #### Wayland
 
 Note that windows don't appear on Wayland until you draw/present to them.
-
-`winit` doesn't do drawing, try the examples in [`glutin`] instead.
-
-[`glutin`]: https://github.com/rust-windowing/glutin
 
 #### WebAssembly
 
@@ -99,7 +97,7 @@ book].
 
 #### Android
 
-The Android backend builds on (and exposes types from) the [`ndk`](https://docs.rs/ndk/0.7.0/ndk/) crate.
+The Android backend builds on (and exposes types from) the [`ndk`](https://docs.rs/ndk/latest/ndk/) crate.
 
 Native Android applications need some form of "glue" crate that is responsible
 for defining the main entry point for your Rust application as well as tracking
@@ -118,6 +116,7 @@ clash.
 
 | winit |       ndk-glue               |
 | :---: | :--------------------------: |
+| 0.29  | `android-activity = "0.5"`   |
 | 0.28  | `android-activity = "0.4"`   |
 | 0.27  | `ndk-glue = "0.7"`           |
 | 0.26  | `ndk-glue = "0.5"`           |
@@ -152,40 +151,13 @@ class. Your application _must_ specify the base class it needs via a feature fla
 [agdk_releases]: https://developer.android.com/games/agdk/download#agdk-libraries
 [Gradle]: https://developer.android.com/studio/build
 
-For example, add this to Cargo.toml:
-```toml
-winit = { version = "0.28", features = [ "android-native-activity" ] }
-
-[target.'cfg(target_os = "android")'.dependencies]
-android_logger = "0.11.0"
-```
-
-And, for example, define an entry point for your library like this:
-```rust
-#[cfg(target_os = "android")]
-use winit::platform::android::activity::AndroidApp;
-
-#[cfg(target_os = "android")]
-#[no_mangle]
-fn android_main(app: AndroidApp) {
-    use winit::platform::android::EventLoopBuilderExtAndroid;
-
-    android_logger::init_once(android_logger::Config::default().with_min_level(log::Level::Trace));
-
-    let event_loop = EventLoopBuilder::with_user_event()
-        .with_android_app(app)
-        .build();
-    _main(event_loop);
-}
-```
-
 For more details, refer to these `android-activity` [example applications](https://github.com/rib/android-activity/tree/main/examples).
 
 ##### Converting from `ndk-glue` to `android-activity`
 
 If your application is currently based on `NativeActivity` via the `ndk-glue` crate and building with `cargo apk` then the minimal changes would be:
 1. Remove `ndk-glue` from your `Cargo.toml`
-2. Enable the `"android-native-activity"` feature for Winit: `winit = { version = "0.28", features = [ "android-native-activity" ] }`
+2. Enable the `"android-native-activity"` feature for Winit: `winit = { version = "0.29.3", features = [ "android-native-activity" ] }`
 3. Add an `android_main` entrypoint (as above), instead of using the '`[ndk_glue::main]` proc macro from `ndk-macros` (optionally add a dependency on `android_logger` and initialize logging as above).
 4. Pass a clone of the `AndroidApp` that your application receives to Winit when building your event loop (as shown above).
 
@@ -196,13 +168,13 @@ doing anything; this includes creating windows, fetching monitors, drawing,
 and so on, see issues [#2238], [#2051] and [#2087].
 
 If you encounter problems, you should try doing your initialization inside
-`Event::NewEvents(StartCause::Init)`.
+`Event::Resumed`.
 
 #### iOS
 
 Similar to macOS, iOS's main `UIApplicationMain` does some init work that's required
 by all UI related code, see issue [#1705]. You should consider creating your windows
-inside `Event::NewEvents(StartCause::Init)`.
+inside `Event::Resumed`.
 
 
 [#2238]: https://github.com/rust-windowing/winit/issues/2238

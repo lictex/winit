@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use fnv::FnvHashMap;
+use ahash::AHashMap;
 
 use sctk::reexports::client::protocol::wl_seat::WlSeat;
 use sctk::reexports::client::protocol::wl_touch::WlTouch;
@@ -31,7 +31,7 @@ use keyboard::{KeyboardData, KeyboardState};
 use text_input::TextInputData;
 use touch::TouchPoint;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct WinitSeatState {
     /// The pointer bound on the seat.
     pointer: Option<Arc<super::GenericPointer>>,
@@ -40,7 +40,7 @@ pub struct WinitSeatState {
     touch: Option<WlTouch>,
 
     /// The mapping from touched points to the surfaces they're present.
-    touch_map: FnvHashMap<i32, TouchPoint>,
+    touch_map: AHashMap<i32, TouchPoint>,
 
     /// The text input bound on the seat.
     text_input: Option<Arc<ZwpTextInputV3>>,
@@ -60,16 +60,7 @@ pub struct WinitSeatState {
 
 impl WinitSeatState {
     pub fn new() -> Self {
-        Self {
-            pointer: None,
-            touch: None,
-            relative_pointer: None,
-            text_input: None,
-            touch_map: Default::default(),
-            keyboard_state: None,
-            modifiers: ModifiersState::empty(),
-            modifiers_pending: false,
-        }
+        Default::default()
     }
 }
 
@@ -99,12 +90,14 @@ impl SeatHandler for WinitState {
             SeatCapability::Pointer if seat_state.pointer.is_none() => {
                 let surface = self.compositor_state.create_surface(queue_handle);
                 let surface_id = surface.id();
-                let pointer_data = WinitPointerData::new(seat.clone(), surface);
+                let pointer_data = WinitPointerData::new(seat.clone());
                 let themed_pointer = self
                     .seat_state
                     .get_pointer_with_theme_and_data(
                         queue_handle,
                         &seat,
+                        self.shm.wl_shm(),
+                        surface,
                         ThemeSpec::System,
                         pointer_data,
                     )
@@ -165,11 +158,13 @@ impl SeatHandler for WinitState {
                     relative_pointer.destroy();
                 }
 
-                if let Some(pointer) = seat_state.pointer.take() {
+                if let Some(pointer @ super::GenericPointer::Default(themed)) =
+                    seat_state.pointer.take().as_deref()
+                {
                     let pointer_data = pointer.winit_data();
 
                     // Remove the cursor from the mapping.
-                    let surface_id = pointer_data.cursor_surface().id();
+                    let surface_id = themed.surface().id();
                     let _ = self.pointer_surfaces.remove(&surface_id);
 
                     // Remove the inner locks/confines before dropping the pointer.

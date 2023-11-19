@@ -108,20 +108,12 @@ impl MonitorHandle {
     /// Returns a human-readable name of the monitor.
     ///
     /// Returns `None` if the monitor doesn't exist anymore.
-    ///
-    /// ## Platform-specific
-    ///
-    /// - **Web:** Always returns None
     #[inline]
     pub fn name(&self) -> Option<String> {
         self.inner.name()
     }
 
     /// Returns the monitor's resolution.
-    ///
-    /// ## Platform-specific
-    ///
-    /// - **Web:** Always returns (0,0)
     #[inline]
     pub fn size(&self) -> PhysicalSize<u32> {
         self.inner.size()
@@ -129,10 +121,6 @@ impl MonitorHandle {
 
     /// Returns the top-left corner position of the monitor relative to the larger full
     /// screen area.
-    ///
-    /// ## Platform-specific
-    ///
-    /// - **Web:** Always returns (0,0)
     #[inline]
     pub fn position(&self) -> PhysicalPosition<i32> {
         self.inner.position()
@@ -150,15 +138,18 @@ impl MonitorHandle {
         self.inner.refresh_rate_millihertz()
     }
 
-    /// Returns the scale factor that can be used to map logical pixels to physical pixels, and vice versa.
+    /// Returns the scale factor of the underlying monitor. To map logical pixels to physical
+    /// pixels and vice versa, use [`Window::scale_factor`].
     ///
     /// See the [`dpi`](crate::dpi) module for more information.
     ///
     /// ## Platform-specific
     ///
     /// - **X11:** Can be overridden using the `WINIT_X11_SCALE_FACTOR` environment variable.
+    /// - **Wayland:** May differ from [`Window::scale_factor`].
     /// - **Android:** Always returns 1.0.
-    /// - **Web:** Always returns 1.0
+    ///
+    /// [`Window::scale_factor`]: crate::window::Window::scale_factor
     #[inline]
     pub fn scale_factor(&self) -> f64 {
         self.inner.scale_factor()

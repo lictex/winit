@@ -1,30 +1,38 @@
 //! The state of the window, which is shared with the event-loop.
 
-use std::mem::ManuallyDrop;
 use std::num::NonZeroU32;
 use std::sync::{Arc, Weak};
+use std::time::Duration;
 
-use log::warn;
+use log::{info, warn};
 
 use sctk::reexports::client::protocol::wl_seat::WlSeat;
 use sctk::reexports::client::protocol::wl_shm::WlShm;
 use sctk::reexports::client::protocol::wl_surface::WlSurface;
 use sctk::reexports::client::{Connection, Proxy, QueueHandle};
+use sctk::reexports::csd_frame::{
+    DecorationsFrame, FrameAction, FrameClick, ResizeEdge, WindowState as XdgWindowState,
+};
 use sctk::reexports::protocols::wp::fractional_scale::v1::client::wp_fractional_scale_v1::WpFractionalScaleV1;
 use sctk::reexports::protocols::wp::text_input::zv3::client::zwp_text_input_v3::ZwpTextInputV3;
 use sctk::reexports::protocols::wp::viewporter::client::wp_viewport::WpViewport;
-use sctk::reexports::protocols::xdg::shell::client::xdg_toplevel::ResizeEdge;
+use sctk::reexports::protocols::xdg::shell::client::xdg_toplevel::ResizeEdge as XdgResizeEdge;
 
-use sctk::compositor::{CompositorState, Region, SurfaceData};
-use sctk::shell::xdg::frame::{DecorationsFrame, FrameAction, FrameClick};
+use sctk::compositor::{CompositorState, Region};
+use sctk::seat::pointer::ThemedPointer;
 use sctk::shell::xdg::window::{DecorationMode, Window, WindowConfigure};
 use sctk::shell::xdg::XdgSurface;
 use sctk::shell::WaylandSurface;
 use sctk::shm::Shm;
 use sctk::subcompositor::SubcompositorState;
+use wayland_protocols_plasma::blur::client::org_kde_kwin_blur::OrgKdeKwinBlur;
 
-use crate::dpi::{LogicalPosition, LogicalSize};
+use crate::dpi::{LogicalPosition, LogicalSize, PhysicalSize, Size};
 use crate::error::{ExternalError, NotSupportedError};
+use crate::event::WindowEvent;
+use crate::platform_impl::wayland::event_loop::sink::EventSink;
+use crate::platform_impl::wayland::make_wid;
+use crate::platform_impl::wayland::types::kwin_blur::KWinBlurManager;
 use crate::platform_impl::WindowId;
 use crate::window::{CursorGrabMode, CursorIcon, ImePurpose, ResizeDirection, Theme};
 
@@ -36,7 +44,7 @@ use crate::platform_impl::wayland::state::{WindowCompositorUpdate, WinitState};
 #[cfg(feature = "sctk-adwaita")]
 pub type WinitFrame = sctk_adwaita::AdwaitaFrame<WinitState>;
 #[cfg(not(feature = "sctk-adwaita"))]
-pub type WinitFrame = sctk::shell::xdg::frame::fallback_frame::FallbackFrame<WinitState>;
+pub type WinitFrame = sctk::shell::xdg::fallback_frame::FallbackFrame<WinitState>;
 
 // Minimum window inner size.
 const MIN_WINDOW_SIZE: LogicalSize<u32> = LogicalSize::new(2, 1);
@@ -45,9 +53,6 @@ const MIN_WINDOW_SIZE: LogicalSize<u32> = LogicalSize::new(2, 1);
 pub struct WindowState {
     /// The connection to Wayland server.
     pub connection: Connection,
-
-    /// The underlying SCTK window.
-    pub window: ManuallyDrop<Window>,
 
     /// The window frame, which is created from the configure request.
     frame: Option<WinitFrame>,
@@ -112,6 +117,9 @@ pub struct WindowState {
     /// Whether the CSD fail to create, so we don't try to create them on each iteration.
     csd_fails: bool,
 
+    /// Whether we should decorate the frame.
+    decorate: bool,
+
     /// Min size.
     min_inner_size: LogicalSize<u32>,
     max_inner_size: Option<LogicalSize<u32>>,
@@ -121,30 +129,86 @@ pub struct WindowState {
     /// sends `None` for the new size in the configure.
     stateless_size: LogicalSize<u32>,
 
+    /// Initial window size provided by the user. Removed on the first
+    /// configure.
+    initial_size: Option<Size>,
+
+    /// The state of the frame callback.
+    frame_callback_state: FrameCallbackState,
+
     viewport: Option<WpViewport>,
     fractional_scale: Option<WpFractionalScaleV1>,
-}
+    blur: Option<OrgKdeKwinBlur>,
+    blur_manager: Option<KWinBlurManager>,
 
-/// The state of the cursor grabs.
-#[derive(Clone, Copy)]
-struct GrabState {
-    /// The grab mode requested by the user.
-    user_grab_mode: CursorGrabMode,
+    /// Whether the client side decorations have pending move operations.
+    ///
+    /// The value is the serial of the event triggered moved.
+    has_pending_move: Option<u32>,
 
-    /// The current grab mode.
-    current_grab_mode: CursorGrabMode,
-}
-
-impl GrabState {
-    fn new() -> Self {
-        Self {
-            user_grab_mode: CursorGrabMode::None,
-            current_grab_mode: CursorGrabMode::None,
-        }
-    }
+    /// The underlying SCTK window.
+    pub window: Window,
 }
 
 impl WindowState {
+    /// Create new window state.
+    pub fn new(
+        connection: Connection,
+        queue_handle: &QueueHandle<WinitState>,
+        winit_state: &WinitState,
+        initial_size: Size,
+        window: Window,
+        theme: Option<Theme>,
+    ) -> Self {
+        let compositor = winit_state.compositor_state.clone();
+        let pointer_constraints = winit_state.pointer_constraints.clone();
+        let viewport = winit_state
+            .viewporter_state
+            .as_ref()
+            .map(|state| state.get_viewport(window.wl_surface(), queue_handle));
+        let fractional_scale = winit_state
+            .fractional_scaling_manager
+            .as_ref()
+            .map(|fsm| fsm.fractional_scaling(window.wl_surface(), queue_handle));
+
+        Self {
+            blur: None,
+            blur_manager: winit_state.kwin_blur_manager.clone(),
+            compositor,
+            connection,
+            csd_fails: false,
+            cursor_grab_mode: GrabState::new(),
+            cursor_icon: CursorIcon::Default,
+            cursor_visible: true,
+            decorate: true,
+            fractional_scale,
+            frame: None,
+            frame_callback_state: FrameCallbackState::None,
+            has_focus: false,
+            has_pending_move: None,
+            ime_allowed: false,
+            ime_purpose: ImePurpose::Normal,
+            last_configure: None,
+            max_inner_size: None,
+            min_inner_size: MIN_WINDOW_SIZE,
+            pointer_constraints,
+            pointers: Default::default(),
+            queue_handle: queue_handle.clone(),
+            resizable: true,
+            scale_factor: 1.,
+            shm: winit_state.shm.wl_shm().clone(),
+            size: initial_size.to_logical(1.),
+            stateless_size: initial_size.to_logical(1.),
+            initial_size: Some(initial_size),
+            text_inputs: Vec::new(),
+            theme,
+            title: String::default(),
+            transparent: false,
+            viewport,
+            window,
+        }
+    }
+
     /// Apply closure on the given pointer.
     fn apply_on_poiner<F: Fn(&crate::platform_impl::wayland::GenericPointer, &WinitPointerData)>(
         &self,
@@ -159,18 +223,54 @@ impl WindowState {
             })
     }
 
+    /// Get the current state of the frame callback.
+    pub fn frame_callback_state(&self) -> FrameCallbackState {
+        self.frame_callback_state
+    }
+
+    /// The frame callback was received, but not yet sent to the user.
+    pub fn frame_callback_received(&mut self) {
+        self.frame_callback_state = FrameCallbackState::Received;
+    }
+
+    /// Reset the frame callbacks state.
+    pub fn frame_callback_reset(&mut self) {
+        self.frame_callback_state = FrameCallbackState::None;
+    }
+
+    /// Request a frame callback if we don't have one for this window in flight.
+    pub fn request_frame_callback(&mut self) {
+        let surface = self.window.wl_surface();
+        match self.frame_callback_state {
+            FrameCallbackState::None | FrameCallbackState::Received => {
+                self.frame_callback_state = FrameCallbackState::Requested;
+                surface.frame(&self.queue_handle, surface.clone());
+            }
+            FrameCallbackState::Requested => (),
+        }
+    }
+
     pub fn configure(
         &mut self,
         configure: WindowConfigure,
         shm: &Shm,
         subcompositor: &Arc<SubcompositorState>,
+        event_sink: &mut EventSink,
     ) -> LogicalSize<u32> {
+        // NOTE: when using fractional scaling or wl_compositor@v6 the scaling
+        // should be delivered before the first configure, thus apply it to
+        // properly scale the physical sizes provided by the users.
+        if let Some(initial_size) = self.initial_size.take() {
+            self.size = initial_size.to_logical(self.scale_factor());
+            self.stateless_size = self.size;
+        }
+
         if configure.decoration_mode == DecorationMode::Client
             && self.frame.is_none()
             && !self.csd_fails
         {
             match WinitFrame::new(
-                &*self.window,
+                &self.window,
                 shm,
                 subcompositor.clone(),
                 self.queue_handle.clone(),
@@ -179,8 +279,9 @@ impl WindowState {
             ) {
                 Ok(mut frame) => {
                     frame.set_title(&self.title);
-                    // Ensure that the frame is not hidden.
-                    frame.set_hidden(false);
+                    frame.set_scaling_factor(self.scale_factor);
+                    // Hide the frame if we were asked to not decorate.
+                    frame.set_hidden(!self.decorate);
                     self.frame = Some(frame);
                 }
                 Err(err) => {
@@ -195,7 +296,20 @@ impl WindowState {
 
         let stateless = Self::is_stateless(&configure);
 
-        let new_size = if let Some(frame) = self.frame.as_mut() {
+        // Emit `Occluded` event on suspension change.
+        let occluded = configure.state.contains(XdgWindowState::SUSPENDED);
+        if self
+            .last_configure
+            .as_ref()
+            .map(|c| c.state.contains(XdgWindowState::SUSPENDED))
+            .unwrap_or(false)
+            != occluded
+        {
+            let window_id = make_wid(self.window.wl_surface());
+            event_sink.push_window_event(WindowEvent::Occluded(occluded), window_id);
+        }
+
+        let (mut new_size, constrain) = if let Some(frame) = self.frame.as_mut() {
             // Configure the window states.
             frame.update_state(configure.state);
 
@@ -203,21 +317,37 @@ impl WindowState {
                 (Some(width), Some(height)) => {
                     let (width, height) = frame.subtract_borders(width, height);
                     (
-                        width.map(|w| w.get()).unwrap_or(1),
-                        height.map(|h| h.get()).unwrap_or(1),
+                        (
+                            width.map(|w| w.get()).unwrap_or(1),
+                            height.map(|h| h.get()).unwrap_or(1),
+                        )
+                            .into(),
+                        false,
                     )
-                        .into()
                 }
-                (_, _) if stateless => self.stateless_size,
-                _ => self.size,
+                (_, _) if stateless => (self.stateless_size, true),
+                _ => (self.size, true),
             }
         } else {
             match configure.new_size {
-                (Some(width), Some(height)) => (width.get(), height.get()).into(),
-                _ if stateless => self.stateless_size,
-                _ => self.size,
+                (Some(width), Some(height)) => ((width.get(), height.get()).into(), false),
+                _ if stateless => (self.stateless_size, true),
+                _ => (self.size, true),
             }
         };
+
+        // Apply configure bounds only when compositor let the user decide what size to pick.
+        if constrain {
+            let bounds = self.inner_size_bounds(&configure);
+            new_size.width = bounds
+                .0
+                .map(|bound_w| new_size.width.min(bound_w.get()))
+                .unwrap_or(new_size.width);
+            new_size.height = bounds
+                .1
+                .map(|bound_h| new_size.height.min(bound_h.get()))
+                .unwrap_or(new_size.height);
+        }
 
         // XXX Set the configure before doing a resize.
         self.last_configure = Some(configure);
@@ -226,6 +356,30 @@ impl WindowState {
         self.resize(new_size);
 
         new_size
+    }
+
+    /// Compute the bounds for the inner size of the surface.
+    fn inner_size_bounds(
+        &self,
+        configure: &WindowConfigure,
+    ) -> (Option<NonZeroU32>, Option<NonZeroU32>) {
+        let configure_bounds = match configure.suggested_bounds {
+            Some((width, height)) => (NonZeroU32::new(width), NonZeroU32::new(height)),
+            None => (None, None),
+        };
+
+        if let Some(frame) = self.frame.as_ref() {
+            let (width, height) = frame.subtract_borders(
+                configure_bounds.0.unwrap_or(NonZeroU32::new(1).unwrap()),
+                configure_bounds.1.unwrap_or(NonZeroU32::new(1).unwrap()),
+            );
+            (
+                configure_bounds.0.and(width),
+                configure_bounds.1.and(height),
+            )
+        } else {
+            configure_bounds
+        }
     }
 
     #[inline]
@@ -261,23 +415,40 @@ impl WindowState {
     }
 
     /// Tells whether the window should be closed.
+    #[allow(clippy::too_many_arguments)]
     pub fn frame_click(
         &mut self,
         click: FrameClick,
         pressed: bool,
         seat: &WlSeat,
         serial: u32,
+        timestamp: Duration,
         window_id: WindowId,
         updates: &mut Vec<WindowCompositorUpdate>,
     ) -> Option<bool> {
-        match self.frame.as_mut()?.on_click(click, pressed)? {
+        match self.frame.as_mut()?.on_click(timestamp, click, pressed)? {
             FrameAction::Minimize => self.window.set_minimized(),
             FrameAction::Maximize => self.window.set_maximized(),
             FrameAction::UnMaximize => self.window.unset_maximized(),
             FrameAction::Close => WinitState::queue_close(updates, window_id),
-            FrameAction::Move => self.window.move_(seat, serial),
-            FrameAction::Resize(edge) => self.window.resize(seat, serial, edge),
+            FrameAction::Move => self.has_pending_move = Some(serial),
+            FrameAction::Resize(edge) => {
+                let edge = match edge {
+                    ResizeEdge::None => XdgResizeEdge::None,
+                    ResizeEdge::Top => XdgResizeEdge::Top,
+                    ResizeEdge::Bottom => XdgResizeEdge::Bottom,
+                    ResizeEdge::Left => XdgResizeEdge::Left,
+                    ResizeEdge::TopLeft => XdgResizeEdge::TopLeft,
+                    ResizeEdge::BottomLeft => XdgResizeEdge::BottomLeft,
+                    ResizeEdge::Right => XdgResizeEdge::Right,
+                    ResizeEdge::TopRight => XdgResizeEdge::TopRight,
+                    ResizeEdge::BottomRight => XdgResizeEdge::BottomRight,
+                    _ => return None,
+                };
+                self.window.resize(seat, serial, edge);
+            }
             FrameAction::ShowMenu(x, y) => self.window.show_window_menu(seat, serial, (x, y)),
+            _ => (),
         };
 
         Some(false)
@@ -290,9 +461,27 @@ impl WindowState {
     }
 
     // Move the point over decorations.
-    pub fn frame_point_moved(&mut self, surface: &WlSurface, x: f64, y: f64) -> Option<&str> {
+    pub fn frame_point_moved(
+        &mut self,
+        seat: &WlSeat,
+        surface: &WlSurface,
+        timestamp: Duration,
+        x: f64,
+        y: f64,
+    ) -> Option<CursorIcon> {
+        // Take the serial if we had any, so it doesn't stick around.
+        let serial = self.has_pending_move.take();
+
         if let Some(frame) = self.frame.as_mut() {
-            frame.click_point_moved(surface, x, y)
+            let cursor = frame.click_point_moved(timestamp, &surface.id(), x, y);
+            // If we have a cursor change, that means that cursor is over the decorations,
+            // so try to apply move.
+            if let Some(serial) = cursor.is_some().then_some(serial).flatten() {
+                self.window.move_(seat, serial);
+                None
+            } else {
+                cursor
+            }
         } else {
             None
         }
@@ -358,62 +547,10 @@ impl WindowState {
             .map(|configure| configure.decoration_mode == DecorationMode::Client)
             .unwrap_or(false);
         if let Some(frame) = csd.then_some(self.frame.as_ref()).flatten() {
-            frame.is_hidden()
+            !frame.is_hidden()
         } else {
             // Server side decorations.
             true
-        }
-    }
-
-    /// Create new window state.
-    pub fn new(
-        connection: Connection,
-        queue_handle: &QueueHandle<WinitState>,
-        winit_state: &WinitState,
-        size: LogicalSize<u32>,
-        window: Window,
-        theme: Option<Theme>,
-    ) -> Self {
-        let compositor = winit_state.compositor_state.clone();
-        let pointer_constraints = winit_state.pointer_constraints.clone();
-        let viewport = winit_state
-            .viewporter_state
-            .as_ref()
-            .map(|state| state.get_viewport(window.wl_surface(), queue_handle));
-        let fractional_scale = winit_state
-            .fractional_scaling_manager
-            .as_ref()
-            .map(|fsm| fsm.fractional_scaling(window.wl_surface(), queue_handle));
-
-        Self {
-            compositor,
-            connection,
-            theme,
-            csd_fails: false,
-            cursor_grab_mode: GrabState::new(),
-            cursor_icon: CursorIcon::Default,
-            cursor_visible: true,
-            fractional_scale,
-            frame: None,
-            has_focus: false,
-            ime_allowed: false,
-            ime_purpose: ImePurpose::Normal,
-            last_configure: None,
-            max_inner_size: None,
-            min_inner_size: MIN_WINDOW_SIZE,
-            pointer_constraints,
-            pointers: Default::default(),
-            queue_handle: queue_handle.clone(),
-            scale_factor: 1.,
-            shm: winit_state.shm.wl_shm().clone(),
-            size,
-            stateless_size: size,
-            text_inputs: Vec::new(),
-            title: String::default(),
-            transparent: false,
-            resizable: true,
-            viewport,
-            window: ManuallyDrop::new(window),
         }
     }
 
@@ -452,14 +589,12 @@ impl WindowState {
     /// Refresh the decorations frame if it's present returning whether the client should redraw.
     pub fn refresh_frame(&mut self) -> bool {
         if let Some(frame) = self.frame.as_mut() {
-            let dirty = frame.is_dirty();
-            if dirty {
-                frame.draw();
+            if !frame.is_hidden() && frame.is_dirty() {
+                return frame.draw();
             }
-            dirty
-        } else {
-            false
         }
+
+        false
     }
 
     /// Reload the cursor style on the given window.
@@ -485,8 +620,22 @@ impl WindowState {
         }
     }
 
+    /// Try to resize the window when the user can do so.
+    pub fn request_inner_size(&mut self, inner_size: Size) -> PhysicalSize<u32> {
+        if self
+            .last_configure
+            .as_ref()
+            .map(Self::is_stateless)
+            .unwrap_or(true)
+        {
+            self.resize(inner_size.to_logical(self.scale_factor()))
+        }
+
+        self.inner_size().to_physical(self.scale_factor())
+    }
+
     /// Resize the window to the new inner size.
-    pub fn resize(&mut self, inner_size: LogicalSize<u32>) {
+    fn resize(&mut self, inner_size: LogicalSize<u32>) {
         self.size = inner_size;
 
         // Update the stateless size.
@@ -546,20 +695,8 @@ impl WindowState {
             return;
         }
 
-        self.apply_on_poiner(|pointer, data| {
-            let surface = data.cursor_surface();
-            let scale_factor = surface.data::<SurfaceData>().unwrap().scale_factor();
-
-            if pointer
-                .set_cursor(
-                    &self.connection,
-                    cursor_icon.name(),
-                    &self.shm,
-                    surface,
-                    scale_factor,
-                )
-                .is_err()
-            {
+        self.apply_on_poiner(|pointer, _| {
+            if pointer.set_cursor(&self.connection, cursor_icon).is_err() {
                 warn!("Failed to set cursor to {:?}", cursor_icon);
             }
         })
@@ -667,6 +804,15 @@ impl WindowState {
         Ok(())
     }
 
+    pub fn show_window_menu(&self, position: LogicalPosition<u32>) {
+        // TODO(kchibisov) handle touch serials.
+        self.apply_on_poiner(|_, data| {
+            let serial = data.latest_button_serial();
+            let seat = data.seat();
+            self.window.show_window_menu(seat, serial, position.into());
+        });
+    }
+
     /// Set the position of the cursor.
     pub fn set_cursor_position(&self, position: LogicalPosition<f64>) -> Result<(), ExternalError> {
         if self.pointer_constraints.is_none() {
@@ -676,7 +822,7 @@ impl WindowState {
         // Positon can be set only for locked cursor.
         if self.cursor_grab_mode.current_grab_mode != CursorGrabMode::Locked {
             return Err(ExternalError::Os(os_error!(
-                crate::platform_impl::OsError::WaylandMisc(
+                crate::platform_impl::OsError::Misc(
                     "cursor position can be set only for locked cursor."
                 )
             )));
@@ -705,6 +851,28 @@ impl WindowState {
     /// Whether show or hide client side decorations.
     #[inline]
     pub fn set_decorate(&mut self, decorate: bool) {
+        if decorate == self.decorate {
+            return;
+        }
+
+        self.decorate = decorate;
+
+        match self
+            .last_configure
+            .as_ref()
+            .map(|configure| configure.decoration_mode)
+        {
+            Some(DecorationMode::Server) if !self.decorate => {
+                // To disable decorations we should request client and hide the frame.
+                self.window
+                    .request_decoration_mode(Some(DecorationMode::Client))
+            }
+            _ if self.decorate => self
+                .window
+                .request_decoration_mode(Some(DecorationMode::Server)),
+            _ => (),
+        }
+
         if let Some(frame) = self.frame.as_mut() {
             frame.set_hidden(!decorate);
             // Force the resize.
@@ -740,13 +908,14 @@ impl WindowState {
     }
 
     /// Set the IME position.
-    pub fn set_ime_position(&self, position: LogicalPosition<u32>) {
+    pub fn set_ime_cursor_area(&self, position: LogicalPosition<u32>, size: LogicalSize<u32>) {
         // XXX This won't fly unless user will have a way to request IME window per seat, since
         // the ime windows will be overlapping, but winit doesn't expose API to specify for
         // which seat we're setting IME position.
         let (x, y) = (position.x as i32, position.y as i32);
+        let (width, height) = (size.width as i32, size.height as i32);
         for text_input in self.text_inputs.iter() {
-            text_input.set_cursor_rectangle(x, y, 0, 0);
+            text_input.set_cursor_rectangle(x, y, width, height);
             text_input.commit();
         }
     }
@@ -774,6 +943,30 @@ impl WindowState {
         // XXX when fractional scaling is not used update the buffer scale.
         if self.fractional_scale.is_none() {
             let _ = self.window.set_buffer_scale(self.scale_factor as _);
+        }
+
+        if let Some(frame) = self.frame.as_mut() {
+            frame.set_scaling_factor(scale_factor);
+        }
+    }
+
+    /// Make window background blurred
+    #[inline]
+    pub fn set_blur(&mut self, blurred: bool) {
+        if blurred && self.blur.is_none() {
+            if let Some(blur_manager) = self.blur_manager.as_ref() {
+                let blur = blur_manager.blur(self.window.wl_surface(), &self.queue_handle);
+                blur.commit();
+                self.blur = Some(blur);
+            } else {
+                info!("Blur manager unavailable, unable to change blur")
+            }
+        } else if !blurred && self.blur.is_some() {
+            self.blur_manager
+                .as_ref()
+                .unwrap()
+                .unset(self.window.wl_surface());
+            self.blur.take().unwrap().release();
         }
     }
 
@@ -832,26 +1025,65 @@ impl WindowState {
 
 impl Drop for WindowState {
     fn drop(&mut self) {
-        let surface = self.window.wl_surface().clone();
-        unsafe {
-            ManuallyDrop::drop(&mut self.window);
+        if let Some(blur) = self.blur.take() {
+            blur.release();
         }
 
-        surface.destroy();
+        if let Some(fs) = self.fractional_scale.take() {
+            fs.destroy();
+        }
+
+        if let Some(viewport) = self.viewport.take() {
+            viewport.destroy();
+        }
+
+        // NOTE: the wl_surface used by the window is being cleaned up when
+        // dropping SCTK `Window`.
     }
 }
 
-impl From<ResizeDirection> for ResizeEdge {
+/// The state of the cursor grabs.
+#[derive(Clone, Copy)]
+struct GrabState {
+    /// The grab mode requested by the user.
+    user_grab_mode: CursorGrabMode,
+
+    /// The current grab mode.
+    current_grab_mode: CursorGrabMode,
+}
+
+impl GrabState {
+    fn new() -> Self {
+        Self {
+            user_grab_mode: CursorGrabMode::None,
+            current_grab_mode: CursorGrabMode::None,
+        }
+    }
+}
+
+/// The state of the frame callback.
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameCallbackState {
+    /// No frame callback was requsted.
+    #[default]
+    None,
+    /// The frame callback was requested, but not yet arrived, the redraw events are throttled.
+    Requested,
+    /// The callback was marked as done, and user could receive redraw requested
+    Received,
+}
+
+impl From<ResizeDirection> for XdgResizeEdge {
     fn from(value: ResizeDirection) -> Self {
         match value {
-            ResizeDirection::North => ResizeEdge::Top,
-            ResizeDirection::West => ResizeEdge::Left,
-            ResizeDirection::NorthWest => ResizeEdge::TopLeft,
-            ResizeDirection::NorthEast => ResizeEdge::TopRight,
-            ResizeDirection::East => ResizeEdge::Right,
-            ResizeDirection::SouthWest => ResizeEdge::BottomLeft,
-            ResizeDirection::SouthEast => ResizeEdge::BottomRight,
-            ResizeDirection::South => ResizeEdge::Bottom,
+            ResizeDirection::North => XdgResizeEdge::Top,
+            ResizeDirection::West => XdgResizeEdge::Left,
+            ResizeDirection::NorthWest => XdgResizeEdge::TopLeft,
+            ResizeDirection::NorthEast => XdgResizeEdge::TopRight,
+            ResizeDirection::East => XdgResizeEdge::Right,
+            ResizeDirection::SouthWest => XdgResizeEdge::BottomLeft,
+            ResizeDirection::SouthEast => XdgResizeEdge::BottomRight,
+            ResizeDirection::South => XdgResizeEdge::Bottom,
         }
     }
 }

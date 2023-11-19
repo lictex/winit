@@ -1,6 +1,5 @@
 //! Tablet handling.
 
-use fnv::FnvHashMap;
 use sctk::globals::GlobalData;
 use sctk::reexports::client::backend::ObjectId;
 use sctk::reexports::client::globals::{BindError, GlobalList};
@@ -33,8 +32,8 @@ pub struct TabletState {
     pub manager: ZwpTabletManagerV2,
     pub seats: Vec<(ZwpTabletSeatV2, WlSeat)>,
     pub tablets: Vec<ZwpTabletV2>,
-    pub pads: FnvHashMap<ObjectId, PadData>,
-    pub tools: FnvHashMap<ObjectId, ToolData>,
+    pub pads: ahash::AHashMap<ObjectId, PadData>,
+    pub tools: ahash::AHashMap<ObjectId, ToolData>,
 }
 impl TabletState {
     pub fn new(
@@ -95,16 +94,23 @@ impl Dispatch<ZwpTabletManagerV2, GlobalData, WinitState> for TabletState {
 pub struct TabletPointer {
     tool: ZwpTabletToolV2,
     inner: super::WinitPointerData,
+    themed_pointer: sctk::seat::pointer::ThemedPointer<super::WinitPointerData>,
+    shm: WlShm,
 }
 impl TabletPointer {
     pub fn set_cursor(
         &self,
         conn: &Connection,
-        cursor_name: &str,
-        shm: &WlShm,
-        surface: &WlSurface,
-        scale: i32,
+        icon: cursor_icon::CursorIcon,
     ) -> Result<(), sctk::seat::pointer::PointerThemeError> {
+        use sctk::compositor::SurfaceDataExt;
+        let scale = self
+            .themed_pointer
+            .surface()
+            .data::<sctk::compositor::SurfaceData>()
+            .unwrap()
+            .surface_data()
+            .scale_factor();
         let name = std::env::var("XCURSOR_THEME")
             .ok()
             .unwrap_or_else(|| "default".into());
@@ -112,27 +118,35 @@ impl TabletPointer {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(24);
-        let mut theme = wayland_cursor::CursorTheme::load_from_name(conn, shm.clone(), &name, size)
-            .map_err(sctk::seat::pointer::PointerThemeError::InvalidId)?;
+        let mut theme =
+            wayland_cursor::CursorTheme::load_from_name(conn, self.shm.clone(), &name, size)
+                .map_err(sctk::seat::pointer::PointerThemeError::InvalidId)?;
         let cursor = theme
-            .get_cursor(cursor_name)
+            .get_cursor(icon.name())
             .ok_or(sctk::seat::pointer::PointerThemeError::CursorNotFound)?;
         let image = &cursor[0];
         let (w, h) = image.dimensions();
         let (hx, hy) = image.hotspot();
-        surface.set_buffer_scale(scale as i32);
-        surface.attach(Some(image), 0, 0);
-        if surface.version() >= 4 {
-            surface.damage_buffer(0, 0, w as i32, h as i32);
+        self.themed_pointer.surface().set_buffer_scale(scale as i32);
+        self.themed_pointer.surface().attach(Some(image), 0, 0);
+        if self.themed_pointer.surface().version() >= 4 {
+            self.themed_pointer
+                .surface()
+                .damage_buffer(0, 0, w as i32, h as i32);
         } else {
             // surface is old and does not support damage_buffer, so we damage
             // in surface coordinates and hope it is not rescaled
-            surface.damage(0, 0, w as i32 / scale as i32, h as i32 / scale as i32);
+            self.themed_pointer.surface().damage(
+                0,
+                0,
+                w as i32 / scale as i32,
+                h as i32 / scale as i32,
+            );
         }
-        surface.commit();
+        self.themed_pointer.surface().commit();
         self.tool.set_cursor(
             self.inner.latest_enter_serial(),
-            Some(&surface),
+            Some(self.themed_pointer.surface()),
             hx as i32 / scale as i32,
             hy as i32 / scale as i32,
         );
@@ -160,27 +174,44 @@ impl Dispatch<ZwpTabletSeatV2, GlobalData, WinitState> for TabletState {
         _conn: &Connection,
         qhandle: &QueueHandle<WinitState>,
     ) {
-        let Some(tablet) = &mut state.tablet else { return };
+        let Some(tablet) = &mut state.tablet else {
+            return;
+        };
         match event {
             zwp_tablet_seat_v2::Event::TabletAdded { id } => tablet.tablets.push(id),
             zwp_tablet_seat_v2::Event::ToolAdded { id } => {
+                let seat = tablet
+                    .seats
+                    .iter()
+                    .find(|f| &f.0 == proxy)
+                    .unwrap()
+                    .1
+                    .clone();
                 let cursor_surface = state.compositor_state.create_surface(qhandle);
+
+                // let surface_id = cursor_surface.id();
+                let pointer_data = super::WinitPointerData::new(seat.clone());
+                let themed_pointer = state
+                    .seat_state
+                    .get_pointer_with_theme_and_data(
+                        qhandle,
+                        &seat,
+                        state.shm.wl_shm(),
+                        cursor_surface,
+                        super::ThemeSpec::System,
+                        pointer_data,
+                    )
+                    .expect("failed to create pointer with present capability.");
+
                 tablet.tools.insert(
                     id.id(),
                     ToolData {
                         pointer: crate::platform_impl::wayland::GenericPointer::Tablet(
                             TabletPointer {
                                 tool: id,
-                                inner: super::WinitPointerData::new(
-                                    tablet
-                                        .seats
-                                        .iter()
-                                        .find(|f| &f.0 == proxy)
-                                        .unwrap()
-                                        .1
-                                        .clone(),
-                                    cursor_surface,
-                                ),
+                                inner: super::WinitPointerData::new(seat),
+                                themed_pointer,
+                                shm: state.shm.wl_shm().clone(),
                             },
                         )
                         .into(),
@@ -247,7 +278,9 @@ impl Dispatch<ZwpTabletPadV2, GlobalData, WinitState> for TabletState {
         _conn: &Connection,
         _qhandle: &QueueHandle<WinitState>,
     ) {
-        let Some(tablet) = &mut state.tablet else { return };
+        let Some(tablet) = &mut state.tablet else {
+            return;
+        };
         match event {
             zwp_tablet_pad_v2::Event::Group { .. } => { /* not implemented */ }
             zwp_tablet_pad_v2::Event::Path { .. } => { /* not implemented */ }
@@ -326,7 +359,9 @@ impl Dispatch<ZwpTabletToolV2, GlobalData, WinitState> for TabletState {
         _conn: &Connection,
         _qhandle: &QueueHandle<WinitState>,
     ) {
-        let Some(tablet) = &mut state.tablet else { return };
+        let Some(tablet) = &mut state.tablet else {
+            return;
+        };
         let tool = &mut tablet.tools.get_mut(&proxy.id()).unwrap();
 
         match event {
@@ -357,7 +392,9 @@ impl Dispatch<ZwpTabletToolV2, GlobalData, WinitState> for TabletState {
                     window_id,
                 );
 
-                let Some(window) = state.windows.borrow().get(&window_id).cloned() else { return };
+                let Some(window) = state.windows.borrow().get(&window_id).cloned() else {
+                    return;
+                };
                 let mut window = window.lock().unwrap();
                 window.pointer_entered(std::sync::Arc::downgrade(&tool.pointer));
             }
@@ -374,7 +411,9 @@ impl Dispatch<ZwpTabletToolV2, GlobalData, WinitState> for TabletState {
                     window_id,
                 );
 
-                let Some(window) = state.windows.borrow().get(&window_id).cloned() else { return };
+                let Some(window) = state.windows.borrow().get(&window_id).cloned() else {
+                    return;
+                };
                 let mut window = window.lock().unwrap();
                 window.pointer_left(std::sync::Arc::downgrade(&tool.pointer));
             }

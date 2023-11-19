@@ -1,17 +1,23 @@
 use crate::dpi::LogicalPosition;
 use crate::event::{MouseButton, MouseScrollDelta};
-use crate::keyboard::{Key, KeyCode, KeyLocation, ModifiersState};
+use crate::keyboard::{Key, KeyLocation, ModifiersState, NamedKey, PhysicalKey};
 
+use once_cell::unsync::OnceCell;
 use smol_str::SmolStr;
 use std::convert::TryInto;
-use web_sys::{HtmlCanvasElement, KeyboardEvent, MouseEvent, PointerEvent, WheelEvent};
+use wasm_bindgen::prelude::wasm_bindgen;
+use wasm_bindgen::{JsCast, JsValue};
+use web_sys::{KeyboardEvent, MouseEvent, PointerEvent, WheelEvent};
 
 bitflags! {
+    // https://www.w3.org/TR/pointerevents3/#the-buttons-property
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct ButtonsState: u16 {
-        const LEFT   = 0b001;
-        const RIGHT  = 0b010;
-        const MIDDLE = 0b100;
+        const LEFT    = 0b00001;
+        const RIGHT   = 0b00010;
+        const MIDDLE  = 0b00100;
+        const BACK    = 0b01000;
+        const FORWARD = 0b10000;
     }
 }
 
@@ -21,6 +27,8 @@ impl From<ButtonsState> for MouseButton {
             ButtonsState::LEFT => MouseButton::Left,
             ButtonsState::RIGHT => MouseButton::Right,
             ButtonsState::MIDDLE => MouseButton::Middle,
+            ButtonsState::BACK => MouseButton::Back,
+            ButtonsState::FORWARD => MouseButton::Forward,
             _ => MouseButton::Other(value.bits()),
         }
     }
@@ -32,6 +40,8 @@ impl From<MouseButton> for ButtonsState {
             MouseButton::Left => ButtonsState::LEFT,
             MouseButton::Right => ButtonsState::RIGHT,
             MouseButton::Middle => ButtonsState::MIDDLE,
+            MouseButton::Back => ButtonsState::BACK,
+            MouseButton::Forward => ButtonsState::FORWARD,
             MouseButton::Other(value) => ButtonsState::from_bits_retain(value),
         }
     }
@@ -42,15 +52,31 @@ pub fn mouse_buttons(event: &MouseEvent) -> ButtonsState {
 }
 
 pub fn mouse_button(event: &MouseEvent) -> Option<MouseButton> {
+    // https://www.w3.org/TR/pointerevents3/#the-button-property
     match event.button() {
         -1 => None,
         0 => Some(MouseButton::Left),
         1 => Some(MouseButton::Middle),
         2 => Some(MouseButton::Right),
+        3 => Some(MouseButton::Back),
+        4 => Some(MouseButton::Forward),
         i => Some(MouseButton::Other(
             i.try_into()
                 .expect("unexpected negative mouse button value"),
         )),
+    }
+}
+
+impl MouseButton {
+    pub fn to_id(self) -> u32 {
+        match self {
+            MouseButton::Left => 0,
+            MouseButton::Right => 1,
+            MouseButton::Middle => 2,
+            MouseButton::Back => 3,
+            MouseButton::Forward => 4,
+            MouseButton::Other(value) => value.into(),
+        }
     }
 }
 
@@ -61,21 +87,48 @@ pub fn mouse_position(event: &MouseEvent) -> LogicalPosition<f64> {
     }
 }
 
-pub fn mouse_delta(event: &MouseEvent) -> LogicalPosition<f64> {
-    LogicalPosition {
-        x: event.movement_x() as f64,
-        y: event.movement_y() as f64,
-    }
+// TODO: Remove this when Firefox supports correct movement values in coalesced events.
+// See <https://bugzilla.mozilla.org/show_bug.cgi?id=1753724>.
+pub struct MouseDelta(Option<MouseDeltaInner>);
+
+pub struct MouseDeltaInner {
+    old_position: LogicalPosition<f64>,
+    old_delta: LogicalPosition<f64>,
 }
 
-pub fn mouse_position_by_client(
-    event: &MouseEvent,
-    canvas: &HtmlCanvasElement,
-) -> LogicalPosition<f64> {
-    let bounding_client_rect = canvas.get_bounding_client_rect();
-    LogicalPosition {
-        x: event.client_x() as f64 - bounding_client_rect.x(),
-        y: event.client_y() as f64 - bounding_client_rect.y(),
+impl MouseDelta {
+    pub fn init(window: &web_sys::Window, event: &PointerEvent) -> Self {
+        // Firefox has wrong movement values in coalesced events, we will detect that by checking
+        // for `pointerrawupdate` support. Presumably an implementation of `pointerrawupdate`
+        // should require correct movement values, otherwise uncoalesced events might be broken as
+        // well.
+        Self(
+            (!has_pointer_raw_support(window) && has_coalesced_events_support(event)).then(|| {
+                MouseDeltaInner {
+                    old_position: mouse_position(event),
+                    old_delta: LogicalPosition {
+                        x: event.movement_x() as f64,
+                        y: event.movement_y() as f64,
+                    },
+                }
+            }),
+        )
+    }
+
+    pub fn delta(&mut self, event: &MouseEvent) -> LogicalPosition<f64> {
+        if let Some(inner) = &mut self.0 {
+            let new_position = mouse_position(event);
+            let x = new_position.x - inner.old_position.x + inner.old_delta.x;
+            let y = new_position.y - inner.old_position.y + inner.old_delta.y;
+            inner.old_position = new_position;
+            inner.old_delta = LogicalPosition::new(0., 0.);
+            LogicalPosition::new(x, y)
+        } else {
+            LogicalPosition {
+                x: event.movement_x() as f64,
+                y: event.movement_y() as f64,
+            }
+        }
     }
 }
 
@@ -96,9 +149,9 @@ pub fn mouse_scroll_delta(
     }
 }
 
-pub fn key_code(event: &KeyboardEvent) -> KeyCode {
+pub fn key_code(event: &KeyboardEvent) -> PhysicalKey {
     let code = event.code();
-    KeyCode::from_key_code_attribute_value(&code)
+    PhysicalKey::from_key_code_attribute_value(&code)
 }
 
 pub fn key(event: &KeyboardEvent) -> Key {
@@ -110,9 +163,9 @@ pub fn key_text(event: &KeyboardEvent) -> Option<SmolStr> {
     let key = Key::from_key_attribute_value(&key);
     match &key {
         Key::Character(text) => Some(text.clone()),
-        Key::Tab => Some(SmolStr::new("\t")),
-        Key::Enter => Some(SmolStr::new("\r")),
-        Key::Space => Some(SmolStr::new(" ")),
+        Key::Named(NamedKey::Tab) => Some(SmolStr::new("\t")),
+        Key::Named(NamedKey::Enter) => Some(SmolStr::new("\r")),
+        Key::Named(NamedKey::Space) => Some(SmolStr::new(" ")),
         _ => None,
     }
     .map(SmolStr::new)
@@ -169,6 +222,66 @@ pub fn mouse_modifiers(event: &MouseEvent) -> ModifiersState {
     state
 }
 
-pub fn touch_position(event: &PointerEvent, canvas: &HtmlCanvasElement) -> LogicalPosition<f64> {
-    mouse_position_by_client(event, canvas)
+pub fn pointer_move_event(event: PointerEvent) -> impl Iterator<Item = PointerEvent> {
+    // make a single iterator depending on the availability of coalesced events
+    if has_coalesced_events_support(&event) {
+        None.into_iter().chain(
+            Some(
+                event
+                    .get_coalesced_events()
+                    .into_iter()
+                    .map(PointerEvent::unchecked_from_js),
+            )
+            .into_iter()
+            .flatten(),
+        )
+    } else {
+        Some(event).into_iter().chain(None.into_iter().flatten())
+    }
+}
+
+// TODO: Remove when all browsers implement it correctly.
+// See <https://github.com/rust-windowing/winit/issues/2875>.
+pub fn has_pointer_raw_support(window: &web_sys::Window) -> bool {
+    thread_local! {
+        static POINTER_RAW_SUPPORT: OnceCell<bool> = OnceCell::new();
+    }
+
+    POINTER_RAW_SUPPORT.with(|support| {
+        *support.get_or_init(|| {
+            #[wasm_bindgen]
+            extern "C" {
+                type PointerRawSupport;
+
+                #[wasm_bindgen(method, getter, js_name = onpointerrawupdate)]
+                fn has_on_pointerrawupdate(this: &PointerRawSupport) -> JsValue;
+            }
+
+            let support: &PointerRawSupport = window.unchecked_ref();
+            !support.has_on_pointerrawupdate().is_undefined()
+        })
+    })
+}
+
+// TODO: Remove when Safari supports `getCoalescedEvents`.
+// See <https://bugs.webkit.org/show_bug.cgi?id=210454>.
+pub fn has_coalesced_events_support(event: &PointerEvent) -> bool {
+    thread_local! {
+        static COALESCED_EVENTS_SUPPORT: OnceCell<bool> = OnceCell::new();
+    }
+
+    COALESCED_EVENTS_SUPPORT.with(|support| {
+        *support.get_or_init(|| {
+            #[wasm_bindgen]
+            extern "C" {
+                type PointerCoalescedEventsSupport;
+
+                #[wasm_bindgen(method, getter, js_name = getCoalescedEvents)]
+                fn has_get_coalesced_events(this: &PointerCoalescedEventsSupport) -> JsValue;
+            }
+
+            let support: &PointerCoalescedEventsSupport = event.unchecked_ref();
+            !support.has_get_coalesced_events().is_undefined()
+        })
+    })
 }
