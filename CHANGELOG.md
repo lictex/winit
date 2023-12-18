@@ -11,7 +11,28 @@ Unreleased` header.
 
 # Unreleased
 
+- On Windows, macOS, X11, Wayland and Web, implement setting images as cursors. See the `custom_cursors.rs` example.
+  - Add `Window::set_custom_cursor`
+  - Add `CustomCursor`
+  - Add `CustomCursor::from_rgba` to allow creating cursor images from RGBA data.
+  - Add `CustomCursorExtWebSys::from_url` to allow loading cursor images from URLs.
+- On macOS, add services menu.
+- On macOS, remove spurious error logging when handling `Fn`.
+- On X11, fix an issue where floating point data from the server is
+  misinterpreted during a drag and drop operation.
+- On X11, fix a bug where focusing the window would panic.
+- On macOS, fix `refresh_rate_millihertz`.
+- On Wayland, disable Client Side Decorations when `wl_subcompositor` is not supported.
+- On X11, fix `Xft.dpi` detection from Xresources.
+- On Windows, fix consecutive calls to `window.set_fullscreen(Some(Fullscreen::Borderless(None)))` resulting in losing previous window state when eventually exiting fullscreen using `window.set_fullscreen(None)`.
+- On Web, remove queuing fullscreen request in absence of transient activation.
+- On Web, fix setting cursor icon overriding cursor visibility.
+
+# 0.29.4
+
+- Fix crash when running iOS app on macOS.
 - On X11, check common alternative cursor names when loading cursor.
+- On X11, reload the DPI after a property change event.
 - On Windows, fix so `drag_window` and `drag_resize_window` can be called from another thread.
 - On Windows, fix `set_control_flow` in `AboutToWait` not being taken in account.
 - On macOS, send a `Resized` event after each `ScaleFactorChanged` event.

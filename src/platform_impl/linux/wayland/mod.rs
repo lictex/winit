@@ -93,6 +93,32 @@ impl GenericPointer {
             GenericPointer::Tablet(pointer) => pointer.set_cursor(conn, icon),
         }
     }
+    fn surface(&self) -> &WlSurface {
+        match self {
+            GenericPointer::Default(pointer) => pointer.surface(),
+            GenericPointer::Tablet(pointer) => pointer.surface(),
+        }
+    }
+    fn set_cursor_raw(
+        &self,
+        serial: u32,
+        surface: Option<&WlSurface>,
+        hotspot_x: i32,
+        hotspot_y: i32,
+    ) {
+        match self {
+            crate::platform_impl::wayland::GenericPointer::Default(pointer) => {
+                pointer
+                    .pointer()
+                    .set_cursor(serial, surface, hotspot_x, hotspot_y);
+            }
+            crate::platform_impl::wayland::GenericPointer::Tablet(pointer) => {
+                pointer
+                    .tool()
+                    .set_cursor(serial, surface, hotspot_x, hotspot_y);
+            }
+        }
+    }
     fn clear_cursor(&self) {
         match self {
             crate::platform_impl::wayland::GenericPointer::Default(pointer) => {

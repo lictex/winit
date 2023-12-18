@@ -155,6 +155,9 @@ impl TabletPointer {
     pub fn winit_data(&self) -> &super::WinitPointerData {
         &self.inner
     }
+    pub fn surface(&self) -> &WlSurface {
+        &self.themed_pointer.surface()
+    }
     pub fn tool(&self) -> &ZwpTabletToolV2 {
         &self.tool
     }
