@@ -1,14 +1,46 @@
 use core::fmt;
-use std::{error::Error, sync::Arc};
+use std::hash::Hasher;
+use std::sync::Arc;
+use std::{error::Error, hash::Hash};
 
-use crate::platform_impl::PlatformCustomCursor;
+use cursor_icon::CursorIcon;
+
+use crate::event_loop::EventLoopWindowTarget;
+use crate::platform_impl::{self, PlatformCustomCursor, PlatformCustomCursorBuilder};
 
 /// The maximum width and height for a cursor when using [`CustomCursor::from_rgba`].
 pub const MAX_CURSOR_SIZE: u16 = 2048;
 
 const PIXEL_SIZE: usize = 4;
 
+/// See [`Window::set_cursor()`](crate::window::Window::set_cursor) for more details.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum Cursor {
+    Icon(CursorIcon),
+    Custom(CustomCursor),
+}
+
+impl Default for Cursor {
+    fn default() -> Self {
+        Self::Icon(CursorIcon::default())
+    }
+}
+
+impl From<CursorIcon> for Cursor {
+    fn from(icon: CursorIcon) -> Self {
+        Self::Icon(icon)
+    }
+}
+
+impl From<CustomCursor> for Cursor {
+    fn from(custom: CustomCursor) -> Self {
+        Self::Custom(custom)
+    }
+}
+
 /// Use a custom image as a cursor (mouse pointer).
+///
+/// Is guaranteed to be cheap to clone.
 ///
 /// ## Platform-specific
 ///
@@ -16,49 +48,73 @@ const PIXEL_SIZE: usize = 4;
 ///
 /// # Example
 ///
-/// ```
-/// use winit::window::CustomCursor;
+/// ```no_run
+/// use winit::{
+///     event::{Event, WindowEvent},
+///     event_loop::{ControlFlow, EventLoop},
+///     window::{CustomCursor, Window},
+/// };
+///
+/// let mut event_loop = EventLoop::new().unwrap();
 ///
 /// let w = 10;
 /// let h = 10;
 /// let rgba = vec![255; (w * h * 4) as usize];
-/// let custom_cursor = CustomCursor::from_rgba(rgba, w, h, w / 2, h / 2).unwrap();
+///
+/// #[cfg(not(target_family = "wasm"))]
+/// let builder = CustomCursor::from_rgba(rgba, w, h, w / 2, h / 2).unwrap();
 ///
 /// #[cfg(target_family = "wasm")]
-/// let custom_cursor_url = {
+/// let builder = {
 ///     use winit::platform::web::CustomCursorExtWebSys;
-///     CustomCursor::from_url("http://localhost:3000/cursor.png", 0, 0).unwrap()
+///     CustomCursor::from_url(String::from("http://localhost:3000/cursor.png"), 0, 0)
 /// };
+///
+/// let custom_cursor = builder.build(&event_loop);
+///
+/// let window = Window::new(&event_loop).unwrap();
+/// window.set_cursor(custom_cursor.clone());
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct CustomCursor {
-    pub(crate) inner: Arc<PlatformCustomCursor>,
+    /// Platforms should make sure this is cheap to clone.
+    pub(crate) inner: PlatformCustomCursor,
 }
 
 impl CustomCursor {
     /// Creates a new cursor from an rgba buffer.
-    ///
-    /// ## Platform-specific
-    ///
-    /// - **Web:** Setting cursor could be delayed due to the creation of `Blob` objects,
-    ///   which are async by nature.
     pub fn from_rgba(
         rgba: impl Into<Vec<u8>>,
         width: u16,
         height: u16,
         hotspot_x: u16,
         hotspot_y: u16,
-    ) -> Result<Self, BadImage> {
-        Ok(Self {
-            inner: PlatformCustomCursor::from_rgba(
+    ) -> Result<CustomCursorBuilder, BadImage> {
+        Ok(CustomCursorBuilder {
+            inner: PlatformCustomCursorBuilder::from_rgba(
                 rgba.into(),
                 width,
                 height,
                 hotspot_x,
                 hotspot_y,
-            )?
-            .into(),
+            )?,
         })
+    }
+}
+
+/// Builds a [`CustomCursor`].
+///
+/// See [`CustomCursor`] for more details.
+#[derive(Debug)]
+pub struct CustomCursorBuilder {
+    pub(crate) inner: PlatformCustomCursorBuilder,
+}
+
+impl CustomCursorBuilder {
+    pub fn build(self, window_target: &EventLoopWindowTarget) -> CustomCursor {
+        CustomCursor {
+            inner: PlatformCustomCursor::build(self.inner, &window_target.p),
+        }
     }
 }
 
@@ -120,9 +176,54 @@ impl fmt::Display for BadImage {
 
 impl Error for BadImage {}
 
-/// Platforms export this directly as `PlatformCustomCursor` if they need to only work with images.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CursorImage {
+/// Platforms export this directly as `PlatformCustomCursorBuilder` if they need to only work with images.
+#[derive(Debug)]
+pub(crate) struct OnlyCursorImageBuilder(pub(crate) CursorImage);
+
+#[allow(dead_code)]
+impl OnlyCursorImageBuilder {
+    pub(crate) fn from_rgba(
+        rgba: Vec<u8>,
+        width: u16,
+        height: u16,
+        hotspot_x: u16,
+        hotspot_y: u16,
+    ) -> Result<Self, BadImage> {
+        CursorImage::from_rgba(rgba, width, height, hotspot_x, hotspot_y).map(Self)
+    }
+}
+
+/// Platforms export this directly as `PlatformCustomCursor` if they don't implement caching.
+#[derive(Debug, Clone)]
+pub(crate) struct OnlyCursorImage(pub(crate) Arc<CursorImage>);
+
+impl Hash for OnlyCursorImage {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        Arc::as_ptr(&self.0).hash(state);
+    }
+}
+
+impl PartialEq for OnlyCursorImage {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for OnlyCursorImage {}
+
+#[allow(dead_code)]
+impl OnlyCursorImage {
+    pub(crate) fn build(
+        builder: OnlyCursorImageBuilder,
+        _: &platform_impl::EventLoopWindowTarget,
+    ) -> Self {
+        Self(Arc::new(builder.0))
+    }
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+pub(crate) struct CursorImage {
     pub(crate) rgba: Vec<u8>,
     pub(crate) width: u16,
     pub(crate) height: u16,
@@ -130,9 +231,8 @@ pub struct CursorImage {
     pub(crate) hotspot_y: u16,
 }
 
-#[allow(dead_code)]
 impl CursorImage {
-    pub fn from_rgba(
+    pub(crate) fn from_rgba(
         rgba: Vec<u8>,
         width: u16,
         height: u16,
@@ -180,12 +280,12 @@ impl CursorImage {
 }
 
 // Platforms that don't support cursors will export this as `PlatformCustomCursor`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct NoCustomCursor;
 
 #[allow(dead_code)]
 impl NoCustomCursor {
-    pub fn from_rgba(
+    pub(crate) fn from_rgba(
         rgba: Vec<u8>,
         width: u16,
         height: u16,
@@ -194,5 +294,9 @@ impl NoCustomCursor {
     ) -> Result<Self, BadImage> {
         CursorImage::from_rgba(rgba, width, height, hotspot_x, hotspot_y)?;
         Ok(Self)
+    }
+
+    fn build(self, _: &platform_impl::EventLoopWindowTarget) -> NoCustomCursor {
+        self
     }
 }

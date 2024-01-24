@@ -19,7 +19,7 @@ use sctk::reexports::protocols::wp::viewporter::client::wp_viewport::WpViewport;
 use sctk::reexports::protocols::xdg::shell::client::xdg_toplevel::ResizeEdge as XdgResizeEdge;
 
 use sctk::compositor::{CompositorState, Region, SurfaceData, SurfaceDataExt};
-use sctk::seat::pointer::{PointerDataExt, ThemedPointer};
+use sctk::seat::pointer::PointerDataExt;
 use sctk::shell::xdg::window::{DecorationMode, Window, WindowConfigure};
 use sctk::shell::xdg::XdgSurface;
 use sctk::shell::WaylandSurface;
@@ -33,10 +33,10 @@ use crate::dpi::{LogicalPosition, LogicalSize, PhysicalSize, Size};
 use crate::error::{ExternalError, NotSupportedError};
 use crate::event::WindowEvent;
 use crate::platform_impl::wayland::event_loop::sink::EventSink;
-use crate::platform_impl::wayland::make_wid;
 use crate::platform_impl::wayland::types::cursor::{CustomCursor, SelectedCursor};
 use crate::platform_impl::wayland::types::kwin_blur::KWinBlurManager;
-use crate::platform_impl::WindowId;
+use crate::platform_impl::wayland::{logical_to_physical_rounded, make_wid};
+use crate::platform_impl::{PlatformCustomCursor, WindowId};
 use crate::window::{CursorGrabMode, CursorIcon, ImePurpose, ResizeDirection, Theme};
 
 use crate::platform_impl::wayland::seat::{
@@ -262,7 +262,7 @@ impl WindowState {
         shm: &Shm,
         subcompositor: &Option<Arc<SubcompositorState>>,
         event_sink: &mut EventSink,
-    ) -> LogicalSize<u32> {
+    ) -> bool {
         // NOTE: when using fractional scaling or wl_compositor@v6 the scaling
         // should be delivered before the first configure, thus apply it to
         // properly scale the physical sizes provided by the users.
@@ -325,14 +325,9 @@ impl WindowState {
             match configure.new_size {
                 (Some(width), Some(height)) => {
                     let (width, height) = frame.subtract_borders(width, height);
-                    (
-                        (
-                            width.map(|w| w.get()).unwrap_or(1),
-                            height.map(|h| h.get()).unwrap_or(1),
-                        )
-                            .into(),
-                        false,
-                    )
+                    let width = width.map(|w| w.get()).unwrap_or(1);
+                    let height = height.map(|h| h.get()).unwrap_or(1);
+                    ((width, height).into(), false)
                 }
                 (_, _) if stateless => (self.stateless_size, true),
                 _ => (self.size, true),
@@ -358,13 +353,31 @@ impl WindowState {
                 .unwrap_or(new_size.height);
         }
 
-        // XXX Set the configure before doing a resize.
+        let new_state = configure.state;
+        let old_state = self
+            .last_configure
+            .as_ref()
+            .map(|configure| configure.state);
+
+        let state_change_requires_resize = old_state
+            .map(|old_state| {
+                !old_state
+                    .symmetric_difference(new_state)
+                    .difference(XdgWindowState::ACTIVATED | XdgWindowState::SUSPENDED)
+                    .is_empty()
+            })
+            // NOTE: `None` is present for the initial configure, thus we must always resize.
+            .unwrap_or(true);
+
+        // NOTE: Set the configure before doing a resize, since we query it during it.
         self.last_configure = Some(configure);
 
-        // XXX Update the new size right away.
-        self.resize(new_size);
-
-        new_size
+        if state_change_requires_resize || new_size != self.inner_size() {
+            self.resize(new_size);
+            true
+        } else {
+            false
+        }
     }
 
     /// Compute the bounds for the inner size of the surface.
@@ -643,7 +656,7 @@ impl WindowState {
             self.resize(inner_size.to_logical(self.scale_factor()))
         }
 
-        self.inner_size().to_physical(self.scale_factor())
+        logical_to_physical_rounded(self.inner_size(), self.scale_factor())
     }
 
     /// Resize the window to the new inner size.
@@ -713,10 +726,23 @@ impl WindowState {
     }
 
     /// Set the custom cursor icon.
-    pub fn set_custom_cursor(&mut self, cursor: RootCustomCursor) {
+    pub(crate) fn set_custom_cursor(&mut self, cursor: RootCustomCursor) {
+        let cursor = match cursor {
+            RootCustomCursor {
+                inner: PlatformCustomCursor::Wayland(cursor),
+            } => cursor.0,
+            #[cfg(x11_platform)]
+            RootCustomCursor {
+                inner: PlatformCustomCursor::X(_),
+            } => {
+                log::error!("passed a X11 cursor to Wayland backend");
+                return;
+            }
+        };
+
         let cursor = {
             let mut pool = self.custom_cursor_pool.lock().unwrap();
-            CustomCursor::new(&mut pool, &cursor.inner)
+            CustomCursor::new(&mut pool, &cursor)
         };
 
         if self.cursor_visible {
@@ -970,7 +996,7 @@ impl WindowState {
 
     /// Set the IME position.
     pub fn set_ime_cursor_area(&self, position: LogicalPosition<u32>, size: LogicalSize<u32>) {
-        // XXX This won't fly unless user will have a way to request IME window per seat, since
+        // FIXME: This won't fly unless user will have a way to request IME window per seat, since
         // the ime windows will be overlapping, but winit doesn't expose API to specify for
         // which seat we're setting IME position.
         let (x, y) = (position.x as i32, position.y as i32);
@@ -1001,7 +1027,7 @@ impl WindowState {
     pub fn set_scale_factor(&mut self, scale_factor: f64) {
         self.scale_factor = scale_factor;
 
-        // XXX when fractional scaling is not used update the buffer scale.
+        // NOTE: When fractional scaling is not used update the buffer scale.
         if self.fractional_scale.is_none() {
             let _ = self.window.set_buffer_scale(self.scale_factor as _);
         }
@@ -1149,7 +1175,7 @@ impl From<ResizeDirection> for XdgResizeEdge {
     }
 }
 
-// XXX rust doesn't allow from `Option`.
+// NOTE: Rust doesn't allow `From<Option<Theme>>`.
 #[cfg(feature = "sctk-adwaita")]
 fn into_sctk_adwaita_config(theme: Option<Theme>) -> sctk_adwaita::FrameConfig {
     match theme {

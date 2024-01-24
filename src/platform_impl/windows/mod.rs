@@ -8,22 +8,26 @@ use windows_sys::Win32::{
 
 pub(crate) use self::{
     event_loop::{
-        EventLoop, EventLoopProxy, EventLoopWindowTarget, PlatformSpecificEventLoopAttributes,
+        EventLoop, EventLoopProxy, EventLoopWindowTarget, OwnedDisplayHandle,
+        PlatformSpecificEventLoopAttributes,
     },
     icon::{SelectedCursor, WinIcon},
-    monitor::{MonitorHandle, VideoMode},
+    keyboard::{physicalkey_to_scancode, scancode_to_physicalkey},
+    monitor::{MonitorHandle, VideoModeHandle},
     window::Window,
 };
 
+pub(crate) use self::icon::WinCursor as PlatformCustomCursor;
 pub use self::icon::WinIcon as PlatformIcon;
-pub(crate) use crate::cursor::CursorImage as PlatformCustomCursor;
+pub(crate) use crate::cursor::OnlyCursorImageBuilder as PlatformCustomCursorBuilder;
 use crate::platform_impl::Fullscreen;
 
 use crate::event::DeviceId as RootDeviceId;
 use crate::icon::Icon;
 use crate::keyboard::Key;
+use crate::platform::windows::{Color, CornerPreference};
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PlatformSpecificWindowBuilderAttributes {
     pub owner: Option<HWND>,
     pub menu: Option<HMENU>,
@@ -33,6 +37,11 @@ pub struct PlatformSpecificWindowBuilderAttributes {
     pub skip_taskbar: bool,
     pub class_name: String,
     pub decoration_shadow: bool,
+    pub clip_children: bool,
+    pub border_color: Option<Color>,
+    pub title_background_color: Option<Color>,
+    pub title_text_color: Option<Color>,
+    pub corner_preference: Option<CornerPreference>,
 }
 
 impl Default for PlatformSpecificWindowBuilderAttributes {
@@ -46,6 +55,11 @@ impl Default for PlatformSpecificWindowBuilderAttributes {
             skip_taskbar: false,
             class_name: "Window Class".to_string(),
             decoration_shadow: false,
+            clip_children: true,
+            border_color: None,
+            title_background_color: None,
+            title_text_color: None,
+            corner_preference: None,
         }
     }
 }
@@ -89,7 +103,7 @@ pub type OsError = std::io::Error;
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct KeyEventExtra {
-    pub text_with_all_modifers: Option<SmolStr>,
+    pub text_with_all_modifiers: Option<SmolStr>,
     pub key_without_modifiers: Key,
 }
 
