@@ -14,7 +14,6 @@ use sctk::reexports::client::{Connection, Proxy, QueueHandle};
 use sctk::compositor::{CompositorHandler, CompositorState};
 use sctk::output::{OutputHandler, OutputState};
 use sctk::registry::{ProvidesRegistryState, RegistryState};
-use sctk::seat::pointer::ThemedPointer;
 use sctk::seat::SeatState;
 use sctk::shell::xdg::window::{Window, WindowConfigure, WindowHandler};
 use sctk::shell::xdg::XdgShell;
@@ -25,8 +24,7 @@ use sctk::subcompositor::SubcompositorState;
 use crate::platform_impl::wayland::event_loop::sink::EventSink;
 use crate::platform_impl::wayland::output::MonitorHandle;
 use crate::platform_impl::wayland::seat::{
-    PointerConstraintsState, RelativePointerState, TextInputState, WinitPointerData,
-    WinitPointerDataExt, WinitSeatState,
+    PointerConstraintsState, RelativePointerState, TabletState, TextInputState, WinitSeatState,
 };
 use crate::platform_impl::wayland::types::kwin_blur::KWinBlurManager;
 use crate::platform_impl::wayland::types::wp_fractional_scaling::FractionalScalingManager;
@@ -75,7 +73,7 @@ pub struct WinitState {
     pub seats: AHashMap<ObjectId, WinitSeatState>,
 
     /// Currently present cursor surfaces.
-    pub pointer_surfaces: AHashMap<ObjectId, Arc<ThemedPointer<WinitPointerData>>>,
+    pub pointer_surfaces: AHashMap<ObjectId, Arc<super::GenericPointer>>,
 
     /// The state of the text input on the client.
     pub text_input_state: Option<TextInputState>,
@@ -92,6 +90,9 @@ pub struct WinitState {
 
     /// Relative pointer.
     pub relative_pointer: Option<RelativePointerState>,
+
+    /// Tablet.
+    pub tablet: Option<TabletState>,
 
     /// Pointer constraints to handle pointer locking and confining.
     pub pointer_constraints: Option<Arc<PointerConstraintsState>>,
@@ -144,6 +145,13 @@ impl WinitState {
             seats.insert(seat.id(), WinitSeatState::new());
         }
 
+        let mut tablet = TabletState::new(globals, queue_handle).ok();
+        if let Some(tablet) = &mut tablet {
+            for seat in seat_state.seats() {
+                tablet.new_seat(queue_handle, seat);
+            }
+        }
+
         let (viewporter_state, fractional_scaling_manager) =
             if let Ok(fsm) = FractionalScalingManager::new(globals, queue_handle) {
                 (ViewporterState::new(globals, queue_handle).ok(), Some(fsm))
@@ -174,6 +182,7 @@ impl WinitState {
             text_input_state: TextInputState::new(globals, queue_handle).ok(),
 
             relative_pointer: RelativePointerState::new(globals, queue_handle).ok(),
+            tablet,
             pointer_constraints: PointerConstraintsState::new(globals, queue_handle)
                 .map(Arc::new)
                 .ok(),
@@ -220,7 +229,7 @@ impl WinitState {
             self.window_compositor_updates[pos].scale_changed = true;
         } else if let Some(pointer) = self.pointer_surfaces.get(&surface.id()) {
             // Get the window, where the pointer resides right now.
-            let focused_window = match pointer.pointer().winit_data().focused_window() {
+            let focused_window = match pointer.winit_data().focused_window() {
                 Some(focused_window) => focused_window,
                 None => return,
             };

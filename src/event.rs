@@ -522,6 +522,27 @@ pub enum WindowEvent {
     /// [`transform`]: https://developer.mozilla.org/en-US/docs/Web/CSS/transform
     Touch(Touch),
 
+    TabletPenEnter {
+        device_id: DeviceId,
+        inverted: bool,
+    },
+    TabletPenLeave {
+        device_id: DeviceId,
+    },
+    TabletPenMotion {
+        device_id: DeviceId,
+        location: PhysicalPosition<f64>,
+        pressure: f64,
+        rotation: f64,
+        distance: f64,
+        tilt: [f64; 2],
+    },
+    TabletButton {
+        device_id: DeviceId,
+        button: TabletButton,
+        state: ElementState,
+    },
+
     /// The window's scale factor has changed.
     ///
     /// The following user actions can cause DPI changes:
@@ -1040,6 +1061,16 @@ impl Force {
             Force::Normalized(force) => *force,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TabletButton {
+    Tip,
+    Eraser,
+    /// - Only available on **Wayland**.
+    Pen(u32),
+    /// - Only available on **Wayland**.
+    Tablet(u32),
 }
 
 /// Identifier for a specific analog axis on some device.
